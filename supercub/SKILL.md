@@ -169,8 +169,11 @@ Ask these once, one text at a time, the first time the student uses Super Cub af
    On no, run `python3 scripts/connect.py policy --participating no`, and stop. Noticing still works.
 2. "Who should be able to be matched with you: people in your classes, anyone at your school, or anyone on Super Cub?" Classes is `section`, school is `school`, anyone is `network`. Default `school`.
 3. "Can I share names of public-looking events from your calendar and email, like hackathons and career fairs? Yes or no." Default no.
-   Then save the answers: `python3 scripts/connect.py policy --participating yes --discoverable school --share-events no`
+   Then you MUST run the policy command with THEIR answers, not the defaults. Saying yes in chat does nothing until this runs. Example for "anyone" and "yes": `python3 scripts/connect.py policy --participating yes --discoverable network --share-events yes`. Expect `POLICY SAVED. Participating: yes.` If it says `Participating: no`, run it again.
 4. "How often should I sync and check for suggestions? Every 2 hours works for this week." Default every 2 hours. Create ONE scheduled check-in at that interval, named so it stands alone later: "supercub: sync. Run the Sync section of the supercub Skill." It replaces the noticing and matching check-ins, so cancel those if they exist.
+5. Run the first sync right away, following "Each sync" below, so the student is on the network before the first scheduled run. Then tell them in one line what happened: "You're in. Nothing to suggest yet; I'll check every 2 hours." or relay the suggestion.
+
+Setup is done only when `python3 scripts/connect.py context` shows `Participating: yes` and a sync has run. If either is missing, finish it before saying setup is done.
 
 If you don't remember a contact for them, ask step 5's question once. To change an answer later, run `policy` with just that flag. If they want to stop, run `policy --participating no`, sync once so the server knows, and cancel the sync check-in.
 
