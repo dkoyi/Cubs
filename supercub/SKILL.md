@@ -1,11 +1,13 @@
 ---
 name: supercub
-description: Matches the student with another student for a study partner, project or hackathon teammate, ride share, buddy or meal, and remembers what they need and can help with. Use when the student is stuck on a topic and wants someone to study with, needs a teammate for a class project or a hackathon like the Cubbie Hackathon, wants to split a ride (airport, home, a game), wants someone to grab food with, or wants someone to go with to the gym or an event. Also use when they offer to help classmates in a course, ask about a match, or text "stop noticing", "leave campus connect" or "leave super cub".
+description: Notices when the student could use another person and connects them with a student whose life overlaps theirs, once both say yes. Covers a study partner, a project or hackathon teammate, a ride share, a buddy or a meal, and remembers what the student is working on and can help with. Use when the student is stuck on a topic and wants someone to study with, needs a teammate for a class project or a hackathon like the Cubbie Hackathon, wants to split a ride (airport, home, a game), wants someone to grab food with, or wants someone to go with to the gym or an event. Also use when they offer to help classmates in a course, ask about a match, or text "stop noticing", "leave campus connect" or "leave super cub".
 ---
 
 # Super Cub
 
-Super Cub learns what you need and who you can help, then finds you the right person and connects you once you both say yes. That is the promise to the student; this file tells you, Cubbie, how to keep it.
+Super Cub is the start of a social layer for Cubbie. Every student's Cubbie already knows what that student is working on. Super Cub notices when that student could use another person, finds a student whose life overlaps theirs, and introduces them once both say yes. Today the student can also ask directly; over time the asking fades and the noticing does the work. That is the promise to the student; this file tells you, Cubbie, how to keep it.
+
+Two rules shape everything below. The student's context stays with you. Only the smallest signals needed for a connection leave, and only after the student says yes to exactly what will be shared.
 
 ## Campus connect
 
@@ -133,6 +135,8 @@ Say this plainly whenever the student asks about privacy, and in the consent ste
     - `REQUEST EXPIRED`: "Your search ended. Want me to start a new one with fresh times?" If yes, repeat from step 3.
 
 ## Noticing
+
+This is the part of Super Cub that looks before the student asks. You already see the student's courses, deadlines, calendar and email events. Noticing uses them to spot a moment where another person would help, and asks, at most once a night. It never sends any of that context anywhere; it only turns it into a question.
 
 On the student's first join, ask once: "Want me to keep an eye out and suggest people before you ask? I'd check Canvas, your calendar and email events once a night. Yes or no?" On yes, ask what time works, 9 pm if they don't say. Remember the answer and the time in the student's Cubbie memory, and don't ask again.
 

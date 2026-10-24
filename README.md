@@ -2,9 +2,17 @@
 
 Your network is your net worth. Super Cub builds it while you study.
 
-Super Cub is a Skill for [Cubbie](https://cubbie.ai), the AI assistant that lives in your iMessage. Cubbie already knows your classes, your calendar and your deadlines. Super Cub gives it the one thing it was missing: other people.
+Super Cub is a Skill for [Cubbie](https://cubbie.ai), the AI assistant that lives in your iMessage. Cubbie already knows your classes, your deadlines, your calendar and your inbox. Super Cub is the first piece of a social layer on top of that: it notices when you could use another person, finds a student whose life overlaps yours, and introduces you once you both say yes.
 
-Text Cubbie that you're stuck on hash tables, need a teammate for the hackathon, or want to split a ride to the airport. Super Cub finds another student who is free at the same time and has what you need, and connects you once you both say yes. Over time it learns what you need and what you're good at, so it stops asking and starts suggesting.
+Nobody fills out a profile. Nobody joins a pool. Two students in the same CSE 310 section are both staring at Assignment 4. Their Cubbies notice, check that both are open to it, and one text appears on each phone: "Someone in your CSE 310 class is working on the same assignment and is open to studying with classmates. Want me to see if you'd both like to connect?"
+
+That is where this is going. Here is what it does today.
+
+## Today
+
+You can ask Cubbie directly, and it will also start noticing on its own if you let it.
+
+Text Cubbie that you're stuck on hash tables, need a teammate for the hackathon, or want to split a ride to the airport. Super Cub finds another student who is free at the same time and has what you need. Say yes once to "noticing" and Cubbie also looks at Canvas, your calendar and your email events each night and asks at most one question, like "CSE 310 midterm Thursday. Want someone to review with Tuesday night?"
 
 ## Install it
 
@@ -19,33 +27,33 @@ Text Cubbie that you're stuck on hash tables, need a teammate for the hackathon,
    - "Anyone going to PHX airport Friday?"
    - "Want to grab lunch with someone"
 
-That's it. No account, no app, no key.
+No account, no app, no key.
 
 ## What happens next
 
-Cubbie asks what you can offer and when you're free, then shows you exactly what it will share before it shares anything. If someone fits, both of you get asked. Only after two yeses do you see each other's contact, and Cubbie offers to put the time on your calendar.
-
-If nobody fits yet, you're in the pool and Cubbie checks back on a schedule you pick.
-
-Say yes once to "noticing" and Cubbie also looks at Canvas, your calendar and your email events each night and asks at most one question, like "CSE 310 midterm Thursday. Want someone to review with Tuesday night?" Text "stop noticing" to turn that off.
+Cubbie asks what you can offer and when you're free, then shows you exactly what it will share before it shares anything. If someone fits, both of you get asked. Only after two yeses do you see each other's contact, and Cubbie offers to put the time on your calendar. If nobody fits yet, Cubbie checks back on a schedule you pick.
 
 ## What gets shared, and when
 
-- Before you say yes: nothing leaves your Cubbie.
-- After you say yes: your first name, what you need, what you can help with, and a few free windows go to the Super Cub server. Not your whole calendar.
-- After you both say yes: your contact, the one you chose, is shared with that one person.
+- Before you say yes: nothing leaves your Cubbie. Noticing reads your Canvas, calendar and email on your own Cubbie and only turns them into a question.
+- After you say yes: your first name, what you need, what you can help with, and a few free windows go to the Super Cub server. Not your whole calendar, not your inbox.
+- After you both say yes: your contact, the one you chose, goes to that one person.
 - Never: grades, Canvas files, emails, or anything you didn't see in the consent message.
 
-Text "leave super cub" and everything about you is deleted from the server and from Cubbie's memory.
+Text "leave super cub" and everything about you is deleted from the server and from Cubbie's memory. "stop noticing" turns off the nightly check without leaving.
 
 ## Why there is a server
 
-Cubbie only talks to its own student. Your Cubbie cannot message a classmate's Cubbie, and we tested that. So a small server holds requests and passes match proposals between students. Each student says yes inside their own Cubbie, and the server releases contacts only after both have.
+Cubbie only talks to its own student. Your Cubbie cannot message a classmate's Cubbie, and we tested that. So a small server is where two students' permitted signals can meet. Each student says yes inside their own Cubbie, and the server releases contacts only after both have.
+
+## Where this is going
+
+The product is a proactive social intelligence layer for personal AI agents, starting with college campuses. Each student's Cubbie keeps an evolving picture of what that student is doing. A shared layer looks for meaningful intersections between those pictures, decides when one is worth a suggestion, and asks both people. Beyond classmates: the hackathon you're both attending, the company one of you just got an offer from, the robotics project that needs the computer vision you're already studying. Matching and scheduling are what happens after the layer finds something worth acting on. See `research/agent-network-audit.md` for the architecture and what is built so far.
 
 ## For developers
 
 - `supercub/` is the Skill: `SKILL.md` plus `scripts/connect.py`, Python standard library only.
-- `server/` is the matching server: TypeScript on Vercel Functions with Upstash Redis. It needs no secret from the client. Each student's Cubbie makes its own random id and token on first use, and the server only accepts that token for that id afterward.
+- `server/` is the coordination server: TypeScript on Vercel Functions with Upstash Redis. It needs no secret from the client. Each student's Cubbie makes its own random id and token on first use, and the server only accepts that token for that id afterward.
 - `parked/` is a prototype of gallery search for a later skill router. Not part of the Skill.
 
 Deploy your own server: import the repo in Vercel with Root Directory set to `server`, add Upstash Redis from Storage (it sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`), deploy, then set `SERVER_URL` in `supercub/scripts/connect.py` to your host.
@@ -58,11 +66,5 @@ python3 -m unittest discover -s tests -v
 ```
 
 Known limit: two students joining at the same moment can both be matched to the same third student. Accepted for the demo.
-
-## Next
-
-- Helper-first consent: the person who can help says yes first, so the one who asked hears "Maya already said yes, want the intro?"
-- A match card with a link preview in the thread, like Boardy's "someone you should meet," with no contacts on it.
-- A skill router: when you ask for something Cubbie can't do, it checks its own abilities, then your installed Skills, then the Cubbie Hackathon gallery, and installs another team's Skill only after you say yes.
 
 Built for the Cubbie Hackathon, Track 1.
