@@ -36,7 +36,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # Set this to the deployed server, for example "https://<your-project>.vercel.app".
 # It is empty on purpose: the script must never send a student's name and contact
 # to a server we do not run, so it refuses to send anything until this is set.
-SERVER_URL = ""
+SERVER_URL = "https://supercub-server.vercel.app"
 TIMEOUT_SECONDS = 15
 MAX_OUTPUT_CHARS = 7000  # Cubbie reads at most 8,000 characters of output
 MAX_REPLY_BYTES = 256 * 1024
