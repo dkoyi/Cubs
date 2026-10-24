@@ -2,18 +2,27 @@
 // served from an in-process HTTP server that exists only for the length of this test.
 
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { handleJoin, handleLeave, handleMatches, handleRespond } from "../src/handlers.js";
+import {
+  handleAnswer,
+  handleJoin,
+  handleLeave,
+  handleMatches,
+  handlePutContext,
+  handleRespond,
+  handleSuggestions,
+} from "../src/handlers.js";
 import type { Deps } from "../src/handlers.js";
 import { InMemoryStore } from "../src/store.js";
 
 const SCRIPT = resolve(import.meta.dirname, "../../supercub/scripts/connect.py");
+const CONTEXT_EXAMPLE = resolve(import.meta.dirname, "../../supercub/assets/context-example.json");
 const NOW = Date.parse("2026-10-24T16:00:00.000Z");
 
 const store = new InMemoryStore(() => NOW);
@@ -24,7 +33,14 @@ const routes: Record<string, (request: Request, deps: Deps) => Promise<Response>
   "GET /api/matches": handleMatches,
   "POST /api/respond": handleRespond,
   "DELETE /api/me": handleLeave,
+  "PUT /api/context": handlePutContext,
+  "GET /api/suggestions": handleSuggestions,
 };
+
+/** Routes with a path parameter, matched after the exact routes. */
+const patternRoutes: Array<[string, RegExp, (request: Request, deps: Deps) => Promise<Response>]> = [
+  ["POST", /^\/api\/suggestions\/[^/]+\/answer$/, handleAnswer],
+];
 
 async function bridge(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const chunks: Buffer[] = [];
@@ -39,7 +55,10 @@ async function bridge(req: IncomingMessage, res: ServerResponse): Promise<void> 
     headers,
     ...(chunks.length > 0 ? { body: Buffer.concat(chunks) } : {}),
   });
-  const handler = routes[`${method} ${new URL(request.url).pathname}`];
+  const pathname = new URL(request.url).pathname;
+  const handler =
+    routes[`${method} ${pathname}`] ??
+    patternRoutes.find(([m, re]) => m === method && re.test(pathname))?.[2];
   const response = handler ? await handler(request, deps) : new Response("{}", { status: 404 });
   res.writeHead(response.status, { "Content-Type": "application/json" });
   res.end(await response.text());
@@ -155,5 +174,94 @@ describe("Python client against the real handlers", () => {
       expect(r.out).toMatch(/^ERROR\. (UNKNOWN KIND|BAD FREE TIME|NEED TIME ZONE)\./);
     }
     expect(store.keys().length).toBe(before);
+  }, 30_000);
+});
+
+/** A context file shaped like supercub/assets/context-example.json, with this student's name and contact. */
+function contextFile(firstName: string, contact: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "supercub-context-"));
+  dirs.push(dir);
+  const ctx = JSON.parse(readFileSync(CONTEXT_EXAMPLE, "utf8")) as { policy: Record<string, string> };
+  ctx.policy = { ...ctx.policy, first_name: firstName, contact };
+  const path = join(dir, "context.json");
+  writeFileSync(path, JSON.stringify(ctx));
+  return path;
+}
+
+describe("Python client sync loop against the real handlers", () => {
+  it("both students sync, get one ask each, both say yes, and both get the other's contact once", async () => {
+    const alex = student();
+    const jordan = student();
+    const alexFile = contextFile("Alex", "alex@example.edu");
+    const jordanFile = contextFile("Jordan", "+1 480 555 0199");
+
+    for (const s of [alex, jordan]) {
+      const r = await s("policy", "--participating", "yes");
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("POLICY SAVED");
+    }
+
+    // Alex syncs first: nobody to pair with yet.
+    let r = await alex("sync", "--file", alexFile);
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toBe("NOTHING NEW");
+
+    // Jordan syncs: discovery pairs them, and Jordan gets the ask.
+    r = await jordan("sync", "--file", jordanFile);
+    expect(r.code).toBe(0);
+    const jordanLines = r.out.trim().split("\n");
+    expect(jordanLines[0]).toMatch(/^ASK \S+$/);
+    const id = (jordanLines[0] ?? "").slice("ASK ".length);
+    expect(jordanLines[1]).toContain("Someone in your CSE 310 class");
+    expect(jordanLines[1]).toContain("Want me to see if you'd both like to connect?");
+    expect(r.out).not.toContain("Alex");
+    expect(r.out).not.toContain("alex@example.edu");
+
+    // Alex's next sync gets the same suggestion.
+    r = await alex("sync", "--file", alexFile);
+    expect(r.out.trim().split("\n")[0]).toBe(`ASK ${id}`);
+    expect(r.out).not.toContain("Jordan");
+    expect(r.out).not.toContain("555");
+
+    r = await alex("answer", id, "yes");
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toBe("WAITING");
+
+    r = await jordan("answer", id, "yes");
+    expect(r.code).toBe(0);
+    let lines = r.out.trim().split("\n");
+    expect(lines[0]).toBe("AGREED");
+    expect(lines[1]).toContain("You're on. Alex said yes too.");
+    expect(lines[2]).toBe("alex@example.edu");
+    expect(lines[3]).toBe("Calendar times: 2026-10-25T14:00-07:00 to 2026-10-25T15:00-07:00");
+
+    // Alex hears it on the next sync, once.
+    r = await alex("sync", "--file", alexFile);
+    lines = r.out.trim().split("\n");
+    expect(lines[0]).toBe("AGREED");
+    expect(lines[1]).toContain("You're on. Jordan said yes too.");
+    expect(lines[2]).toBe("+1 480 555 0199");
+    expect(lines[3]).toBe("Calendar times: 2026-10-25T14:00-07:00 to 2026-10-25T15:00-07:00");
+    expect((await alex("sync", "--file", alexFile)).out.trim()).toBe("NOTHING NEW");
+
+    // Jordan already heard it from the answer, so the next sync has nothing new.
+    expect((await jordan("sync", "--file", jordanFile)).out.trim()).toBe("NOTHING NEW");
+  }, 30_000);
+
+  it("later prints LATER, and an unknown id prints CLOSED", async () => {
+    // Alex and Jordan from the test above are at their weekly cap, so these two are paired with each other.
+    const casey = student();
+    const dana = student();
+    for (const s of [casey, dana]) await s("policy", "--participating", "yes");
+    expect((await casey("sync", "--file", contextFile("Casey", "casey@example.edu"))).out.trim()).toBe("NOTHING NEW");
+    const r = await dana("sync", "--file", contextFile("Dana", "dana@example.edu"));
+    const id = /^ASK (\S+)/.exec(r.out)?.[1] ?? "";
+    expect(id).not.toBe("");
+
+    let out = (await dana("answer", id, "later")).out.trim();
+    expect(out).toMatch(/^LATER\./);
+
+    out = (await dana("answer", "00000000-0000-4000-8000-000000000000", "yes")).out.trim();
+    expect(out).toMatch(/^CLOSED\./);
   }, 30_000);
 });

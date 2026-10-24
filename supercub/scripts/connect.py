@@ -7,6 +7,10 @@ Subcommands:
   respond  answer a proposed match with --accept or --decline
   leave    delete all of the student's data from the server and this device
   status   show everything: requests and matches
+  sync     share the student's context file with the server, then report at most one suggestion
+  answer   answer a suggestion from sync with yes, no or later
+  policy   save who can be matched with the student and what they share (sent on the next sync)
+  context  show what is stored on this device and the last sync's accepted and rejected counts
 
 Standard library only. Output is short plain text that Cubbie can relay. Every line that
 starts with a word in capitals (NEW MATCH, ERROR. SERVER UNAVAILABLE., ...) is mapped to a
@@ -38,6 +42,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # to a server we do not run, so it refuses to send anything until this is set.
 SERVER_URL = "https://supercub-server.vercel.app"
 TIMEOUT_SECONDS = 15
+# PUT /api/context can take about 60 s when the server's model judge runs. 90 s for that PUT plus
+# 15 s for the GET that follows keeps a whole sync at 105 s, under Cubbie's 2-minute script limit.
+SYNC_PUT_TIMEOUT_SECONDS = 90
 MAX_OUTPUT_CHARS = 7000  # Cubbie reads at most 8,000 characters of output
 MAX_REPLY_BYTES = 256 * 1024
 MAX_WINDOWS = 10
@@ -84,6 +91,31 @@ HELP_LABEL = {
     "food": "They offer",
 }
 GROUP_TYPES = ("course", "campus", "event")
+
+# Sync (see research/loop-contract.md, "Signal schema" and "Policy").
+SIGNAL_TYPES = ("enrolled_in", "working_on", "attending", "interested_in", "can_help_with", "applying_to", "open_to")
+ENTITY_KINDS = ("course", "assignment", "event", "topic", "company", "activity")
+SOURCES = ("canvas", "calendar", "email", "memory", "student")
+OPEN_TO = ("study", "teammates", "rides", "mentoring", "meals", "buddies")
+DISCOVERABLE = ("section", "school", "network")
+MAX_SIGNALS = 60
+MAX_DETAIL_CHARS = 120
+MAX_LABEL_CHARS = 80
+MAX_CONTEXT_BYTES = 512 * 1024
+POLICY_DEFAULTS: JsonDict = {
+    "participating": False,  # only `policy --participating yes` turns this on: that is the student's yes
+    "discoverable": "school",
+    "intro": "ask",
+    "share_events": False,
+    "share_applications": False,
+    "max_suggestions_per_week": 1,
+}
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+PHONE_RE = re.compile(
+    r"(?<!\w)(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\w)"  # +1 (480) 555-0123
+    r"|(?<!\w)\+\d[\d\s.-]{7,}\d(?!\w)"  # +44 20 7946 0958
+    r"|(?<![\w-])\d{3}[.-]\d{4}(?![\w-])"  # 555-0123
+)
 
 
 class ConnectError(Exception):
@@ -223,7 +255,8 @@ def _reason(e: BaseException) -> str:
     return "timed out" if isinstance(cause, TimeoutError) or "timed out" in str(cause).lower() else "no connection"
 
 
-def api(method: str, path: str, identity: JsonDict, body: Optional[JsonDict] = None) -> JsonDict:
+def api(method: str, path: str, identity: JsonDict, body: Optional[JsonDict] = None,
+        timeout: Optional[float] = None) -> JsonDict:
     """Call the server and return its JSON body. Raises ConnectError on any failure."""
     url = server_url() + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -234,13 +267,14 @@ def api(method: str, path: str, identity: JsonDict, body: Optional[JsonDict] = N
         headers={
             "Authorization": f"Bearer {identity['token']}",
             "X-Student-Id": identity["student_id"],
+            "X-Student-Token": identity["token"],
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "campus-connect-skill/1",
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as res:
+        with urllib.request.urlopen(req, timeout=timeout if timeout is not None else TIMEOUT_SECONDS) as res:
             raw = res.read(MAX_REPLY_BYTES + 1)
     except urllib.error.HTTPError as e:
         payload = _error_payload(e)
@@ -715,16 +749,23 @@ def _respond_closed(e: ConnectError, mid: str, seen: JsonDict) -> Optional[list[
     return None
 
 
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def cmd_leave(_args: argparse.Namespace) -> list[str]:
     identity = load_identity(create=False)
     if identity is None:
+        _unlink(data_dir() / "policy.json")
+        _unlink(context_path())
         return ["NOTHING TO DELETE. This student has no campus-connect data on this device."]
     api("DELETE", "/api/me", identity)
-    for name in ("identity.json", "state.json"):
-        try:
-            (data_dir() / name).unlink()
-        except FileNotFoundError:
-            pass
+    for name in ("identity.json", "state.json", "policy.json"):
+        _unlink(data_dir() / name)
+    _unlink(context_path())
     return ["LEFT. All of your campus-connect data is deleted from the server and this device."]
 
 
@@ -748,6 +789,323 @@ def cmd_status(_args: argparse.Namespace) -> list[str]:
         lines.extend(report_match(m, tz))
     if not matches:
         lines.append("No matches yet.")
+    return lines
+
+
+# ---------- sync ----------
+
+
+def context_path() -> Path:
+    """Where Cubbie writes the student's context for a sync."""
+    return Path.home() / ".config" / "supercub" / "context.json"
+
+
+def strip_contacts(text: str) -> str:
+    """Remove anything that looks like an email address or a phone number."""
+    text = PHONE_RE.sub(" ", EMAIL_RE.sub(" ", text))
+    return " ".join(text.split()).strip(" ,;:-")
+
+
+def _safe_text(value: object, limit: int) -> str:
+    text = strip_contacts(clean(value, 1000))
+    return clean(text, limit)
+
+
+def load_policy() -> JsonDict:
+    stored = _read_json(data_dir() / "policy.json") or {}
+    policy = dict(POLICY_DEFAULTS)
+    if isinstance(stored.get("participating"), bool):
+        policy["participating"] = stored["participating"]
+    if stored.get("discoverable") in DISCOVERABLE:
+        policy["discoverable"] = stored["discoverable"]
+    if isinstance(stored.get("share_events"), bool):
+        policy["share_events"] = stored["share_events"]
+    return policy
+
+
+def _yes(value: str) -> bool:
+    return value == "yes"
+
+
+def describe_policy(policy: JsonDict) -> str:
+    who = {"section": "people in your classes", "school": "anyone at your school",
+           "network": "anyone on Super Cub"}[policy["discoverable"]]
+    return (f"Participating: {'yes' if policy['participating'] else 'no'}. Matched with: {who}. "
+            f"Share events: {'yes' if policy['share_events'] else 'no'}.")
+
+
+def cmd_policy(args: argparse.Namespace) -> list[str]:
+    if args.participating is None and args.discoverable is None and args.share_events is None:
+        raise UsageError("give at least one of --participating, --discoverable, --share-events")
+    stored = _read_json(data_dir() / "policy.json") or {}
+    if args.participating is not None:
+        stored["participating"] = _yes(args.participating)
+    if args.discoverable is not None:
+        stored["discoverable"] = args.discoverable
+    if args.share_events is not None:
+        stored["share_events"] = _yes(args.share_events)
+    _write_json(data_dir() / "policy.json", stored)
+    return [f"POLICY SAVED. {describe_policy(load_policy())} It goes to the server on the next sync."]
+
+
+def read_context(path: Path) -> JsonDict:
+    """The context file Cubbie wrote. Raises BAD CONTEXT if it is missing or not a JSON object."""
+    try:
+        with path.open("rb") as f:
+            raw = f.read(MAX_CONTEXT_BYTES + 1)
+    except FileNotFoundError:
+        raise ConnectError(f"There is no context file at {path}. Fix: write it first, then sync.",
+                           tag="BAD CONTEXT") from None
+    except OSError as e:
+        raise ConnectError(f"Could not read {path.name} ({e.strerror or 'read error'}).", tag="BAD CONTEXT") from None
+    if len(raw) > MAX_CONTEXT_BYTES:
+        raise ConnectError(f"{path.name} is too large. Fix: send at most {MAX_SIGNALS} signals.", tag="BAD CONTEXT")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise ConnectError(f"{path.name} is not valid JSON. Fix: write it again in the shape of "
+                           "assets/context-example.json.", tag="BAD CONTEXT") from None
+    if not isinstance(value, dict):
+        raise ConnectError(f"{path.name} must be a JSON object. Fix: write it in the shape of "
+                           "assets/context-example.json.", tag="BAD CONTEXT")
+    if "signals" in value and not isinstance(value["signals"], list):
+        raise ConnectError(f"{path.name} has 'signals' that is not a list. Fix: make it a list.", tag="BAD CONTEXT")
+    return value
+
+
+def _iso(value: object, tz: Optional[tzinfo]) -> Optional[str]:
+    """An ISO timestamp with an offset, or None if it is missing or unreadable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        if tz is None:
+            return None
+        moment = moment.replace(tzinfo=tz)
+    return moment.isoformat(timespec="seconds")
+
+
+def clean_signal(raw: object, policy: JsonDict, tz: Optional[tzinfo], now: datetime) -> Optional[JsonDict]:
+    """One signal ready to send, or None if it is malformed or the student's policy keeps it here."""
+    if not isinstance(raw, dict):
+        return None
+    kind_of = raw.get("type")
+    entity = raw.get("entity") if isinstance(raw.get("entity"), dict) else {}
+    entity_kind = entity.get("kind")
+    if kind_of not in SIGNAL_TYPES or entity_kind not in ENTITY_KINDS:
+        return None
+    if not policy["share_events"] and (kind_of == "attending" or entity_kind == "event"):
+        return None
+    if not policy["share_applications"] and (kind_of == "applying_to" or entity_kind == "company"):
+        return None
+    label = _safe_text(entity.get("label") or entity.get("key"), MAX_LABEL_CHARS)
+    if not label:
+        return None
+    if kind_of == "open_to" and label.lower() not in OPEN_TO:
+        return None
+    signal: JsonDict = {
+        "type": kind_of,
+        "entity": {"kind": entity_kind, "key": label, "label": label},
+        "source": raw.get("source") if raw.get("source") in SOURCES else "memory",
+        "observed_at": _iso(raw.get("observed_at"), tz) or now.isoformat(timespec="seconds"),
+    }
+    detail = _safe_text(raw.get("detail"), MAX_DETAIL_CHARS)
+    if detail:
+        signal["detail"] = detail
+    for field in ("when", "due"):
+        moment = _iso(raw.get(field), tz)
+        if moment:
+            signal[field] = moment
+    return signal
+
+
+def _free_windows(raw: object, tz: Optional[tzinfo], now: datetime) -> list[JsonDict]:
+    out: list[JsonDict] = []
+    for item in _dicts(raw):
+        start, end = item.get("start"), item.get("end")
+        if not isinstance(start, str) or not isinstance(end, str):
+            continue
+        try:
+            s, e = parse_window(f"{start}/{end}", tz, now)
+        except ConnectError:
+            continue  # past, malformed or too far away: leave it out rather than fail a scheduled run
+        out.append({"start": s.isoformat(timespec="seconds"), "end": e.isoformat(timespec="seconds")})
+        if len(out) == MAX_WINDOWS:
+            break
+    return out
+
+
+def build_context(ctx: JsonDict, policy: JsonDict, now: datetime) -> tuple[JsonDict, int]:
+    """The PUT /api/context body and how many signals were left out on this device."""
+    tz_name = clean(ctx.get("tz"), 60)
+    tz: Optional[tzinfo] = None
+    if tz_name:
+        try:
+            tz = parse_tz(tz_name)
+        except ConnectError:
+            raise ConnectError(f"The context file's time zone '{tz_name}' is unknown. "
+                               "Fix: use a name like America/Phoenix.", tag="BAD CONTEXT") from None
+    given = ctx.get("policy") if isinstance(ctx.get("policy"), dict) else {}
+    full_policy = dict(policy)
+    for field, limit in (("first_name", 40), ("school", 60), ("contact", 100)):
+        value = clean(given.get(field), limit)
+        if value:
+            full_policy[field] = value
+    raw_signals = ctx.get("signals") if isinstance(ctx.get("signals"), list) else []
+    signals = [s for s in (clean_signal(r, policy, tz, now) for r in raw_signals) if s is not None]
+    skipped = len(raw_signals) - len(signals)
+    if len(signals) > MAX_SIGNALS:
+        skipped += len(signals) - MAX_SIGNALS
+        signals = signals[:MAX_SIGNALS]
+    body: JsonDict = {"policy": full_policy, "signals": signals, "free": _free_windows(ctx.get("free"), tz, now)}
+    if tz_name:
+        body["tz"] = tz_name
+    return body, skipped
+
+
+def _agreed_lines(item: JsonDict, tz: tzinfo) -> list[str]:
+    name = clean(item.get("first_name"), 40) or "The other student"
+    lines = [
+        "AGREED",
+        clean(item.get("text"), 400) or f"You're on. {name} said yes too.",
+        clean(item.get("contact"), 100) or "No contact given.",
+    ]
+    if isinstance(item.get("when"), dict):
+        lines.append(f"Calendar times: {iso_range(item['when'], tz)}")
+    return lines
+
+
+def _remember_suggestion(state: JsonDict, sid: str, status: str) -> None:
+    seen = state.get("suggestions") if isinstance(state.get("suggestions"), dict) else {}
+    seen.pop(sid, None)
+    seen[sid] = status
+    while len(seen) > 100:
+        del seen[next(iter(seen))]
+    state["suggestions"] = seen
+
+
+def cmd_sync(args: argparse.Namespace) -> list[str]:
+    policy = load_policy()
+    state = load_state()
+    if not policy["participating"]:
+        identity = load_identity(create=False)
+        if identity is not None and state.get("last_sync"):
+            # They were sharing before: tell the server to stop, and send nothing else.
+            api("PUT", "/api/context", identity, {"policy": policy, "signals": [], "free": []},
+                timeout=SYNC_PUT_TIMEOUT_SECONDS)
+            state.pop("last_sync", None)
+            save_state(state)
+        return ["NOT PARTICIPATING. Nothing was shared."]
+
+    ctx = read_context(Path(args.file).expanduser())
+    now = utc_now()
+    body, skipped = build_context(ctx, policy, now)
+    if body.get("tz"):
+        state["tz"] = body["tz"]
+    identity = load_identity(create=True)
+    if identity is None:
+        raise ConnectError("Could not create a campus-connect identity on this device.")
+    result = api("PUT", "/api/context", identity, body, timeout=SYNC_PUT_TIMEOUT_SECONDS)
+    rejected = [
+        f"#{clean(r.get('index'), 5)} {clean(r.get('reason'), 120)}" for r in _dicts(result.get("rejected"))
+    ]
+    state["last_sync"] = {
+        "at": now.isoformat(timespec="seconds"),
+        "sent": len(body["signals"]),
+        "accepted": result.get("accepted") if isinstance(result.get("accepted"), int) else 0,
+        "rejected": rejected[:10],
+        "rejected_count": len(rejected),
+        "skipped_here": skipped,
+        "signals_total": result.get("signals_total") if isinstance(result.get("signals_total"), int) else None,
+    }
+    save_state(state)
+
+    found = api("GET", "/api/suggestions", identity)
+    seen = state.get("suggestions") if isinstance(state.get("suggestions"), dict) else {}
+    tz = _student_tz(state)
+    lines = ["NOTHING NEW"]
+    for item in _dicts(found.get("agreed")):
+        sid = clean(item.get("id"), 60) or clean(item.get("text"), 60)
+        if sid and seen.get(sid) != "agreed":
+            _remember_suggestion(state, sid, "agreed")
+            lines = _agreed_lines(item, tz)
+            break
+    else:
+        ask = found.get("ask") if isinstance(found.get("ask"), dict) else {}
+        sid, text = clean(ask.get("id"), 60), clean(ask.get("text"), 400)
+        if sid and text and sid not in seen:
+            _remember_suggestion(state, sid, "asked")
+            lines = [f"ASK {sid}", text]
+    save_state(state)
+    return lines
+
+
+def cmd_answer(args: argparse.Namespace) -> list[str]:
+    identity = load_identity(create=False)
+    if identity is None:
+        raise ConnectError("The student has not joined Super Cub yet.", tag="NOT JOINED")
+    state = load_state()
+    sid = clean(args.id, 60)
+    if not sid:
+        raise UsageError("the suggestion id is empty")
+    path = f"/api/suggestions/{urllib.parse.quote(sid, safe='')}/answer"
+    try:
+        result = api("POST", path, identity, {"answer": args.answer})
+    except ServerUnavailable:
+        raise
+    except ConnectError as e:
+        if e.http_status in (404, 409, 410):
+            return ["CLOSED. That suggestion is no longer open."]
+        raise
+    status = result.get("status")
+    if status == "agreed":
+        _remember_suggestion(state, sid, "agreed")
+        save_state(state)
+        return _agreed_lines(result, _student_tz(state))
+    if status == "passed":
+        return ["PASSED"]
+    if args.answer == "later":
+        # The server asks again after 24 hours; let the next sync show it.
+        seen = state.get("suggestions") if isinstance(state.get("suggestions"), dict) else {}
+        seen.pop(sid, None)
+        state["suggestions"] = seen
+        save_state(state)
+        return ["LATER. The server will ask again in about a day."]
+    if status == "waiting":
+        return ["WAITING"]
+    raise ServerUnavailable("unreadable reply")
+
+
+def cmd_context(args: argparse.Namespace) -> list[str]:
+    policy = load_policy()
+    lines = [f"POLICY. {describe_policy(policy)}"]
+    path = Path(args.file).expanduser()
+    try:
+        ctx = read_context(path)
+    except ConnectError:
+        lines.append(f"No readable context file at {path}.")
+    else:
+        try:
+            body, skipped = build_context(ctx, policy, utc_now())
+        except ConnectError as e:
+            lines.append(e.line())
+        else:
+            lines.append(f"Context file: {len(body['signals'])} signals to send, {skipped} left out here, "
+                         f"{len(body['free'])} free times.")
+            for s in body["signals"]:
+                extra = f" ({s['detail']})" if s.get("detail") else ""
+                lines.append(f"- {s['type']} {s['entity']['kind']}: {s['entity']['label']}{extra}")
+    last = load_state().get("last_sync")
+    if isinstance(last, dict):
+        lines.append(f"Last sync: {clean(last.get('at'), 40)}. Sent {clean(last.get('sent'), 5)}, "
+                     f"accepted {clean(last.get('accepted'), 5)}, rejected {clean(last.get('rejected_count'), 5)}.")
+        for reason in _strings(last.get("rejected")):
+            lines.append(f"Rejected {reason}")
+    else:
+        lines.append("No sync yet.")
     return lines
 
 
@@ -793,6 +1151,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser("status", help="show requests and matches")
     status.set_defaults(run=cmd_status)
+
+    sync = sub.add_parser("sync", help="share the context file, then report at most one suggestion")
+    sync.add_argument("--file", required=True, help="the context JSON Cubbie wrote")
+    sync.set_defaults(run=cmd_sync)
+
+    answer_cmd = sub.add_parser("answer", help="answer a suggestion from sync")
+    answer_cmd.add_argument("id", help="suggestion id from the ASK line")
+    answer_cmd.add_argument("answer", choices=("yes", "no", "later"))
+    answer_cmd.set_defaults(run=cmd_answer)
+
+    policy = sub.add_parser("policy", help="save sharing choices for the next sync")
+    policy.add_argument("--participating", choices=("yes", "no"))
+    policy.add_argument("--discoverable", choices=DISCOVERABLE)
+    policy.add_argument("--share-events", choices=("yes", "no"))
+    policy.set_defaults(run=cmd_policy)
+
+    context = sub.add_parser("context", help="show what is stored here and the last sync")
+    context.add_argument("--file", default=str(context_path()), help="the context JSON to show")
+    context.set_defaults(run=cmd_context)
     return parser
 
 

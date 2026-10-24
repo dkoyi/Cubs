@@ -53,7 +53,12 @@ export function isToken(value: string): boolean {
   return TOKEN_RE.test(value);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+/** A phone number or an email address, the contact tiers accepted today. */
+export function isContact(value: string): boolean {
+  return EMAIL_RE.test(value) || PHONE_RE.test(value);
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -71,7 +76,7 @@ function text(
   return ok(trimmed);
 }
 
-function isoDate(value: unknown, label: string): Result<Date> {
+export function isoDate(value: unknown, label: string): Result<Date> {
   if (typeof value !== "string" || !ISO_RE.test(value)) {
     return fail(`${label} must be an ISO 8601 time with a time zone, like 2026-10-25T14:00:00-07:00.`);
   }
@@ -126,7 +131,7 @@ export function parseJoin(body: unknown, now: Date): Result<JoinInput> {
 
   const contact = text(body, "contact", LIMITS.contact, 3);
   if (!contact.ok) return contact;
-  if (!EMAIL_RE.test(contact.value) && !PHONE_RE.test(contact.value)) {
+  if (!isContact(contact.value)) {
     return fail("contact must be a phone number or an email address.");
   }
 

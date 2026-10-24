@@ -1,0 +1,16 @@
+{
+  "tz": "America/Phoenix",
+  "policy": { "first_name": "Alex", "school": "ASU", "contact": "alex@example.edu" },
+  "signals": [
+    { "type": "enrolled_in", "entity": { "kind": "course", "label": "CSE 310" }, "detail": "section 12345", "source": "canvas" },
+    { "type": "working_on", "entity": { "kind": "assignment", "label": "CSE 310 HW4" }, "detail": "hash tables", "due": "2026-10-28T23:59:00-07:00", "source": "canvas" },
+    { "type": "attending", "entity": { "kind": "event", "label": "Cubbie Hackathon" }, "when": "2026-10-31T10:00:00-07:00", "source": "email" },
+    { "type": "interested_in", "entity": { "kind": "topic", "label": "machine learning" }, "source": "memory" },
+    { "type": "can_help_with", "entity": { "kind": "topic", "label": "recursion" }, "source": "memory" },
+    { "type": "open_to", "entity": { "kind": "activity", "label": "study" }, "source": "student" }
+  ],
+  "free": [
+    { "start": "2026-10-25T14:00:00-07:00", "end": "2026-10-25T16:00:00-07:00" },
+    { "start": "2026-10-26T19:00:00-07:00", "end": "2026-10-26T21:00:00-07:00" }
+  ]
+}

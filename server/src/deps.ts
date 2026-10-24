@@ -1,6 +1,7 @@
 // Production wiring for the api/ functions.
 
 import type { Deps } from "./handlers.js";
+import { judgeFromEnv } from "./judge.js";
 import { storeFromEnv } from "./store.js";
 
 const notConfigured = (): Response =>
@@ -16,6 +17,9 @@ export function withProductionDeps(
   return async (request) => {
     const store = storeFromEnv();
     if (store === null) return notConfigured();
-    return handler(request, { store, now: () => new Date() });
+    const deps: Deps = { store, now: () => new Date(), judge: judgeFromEnv() };
+    const secret = process.env.DISCOVER_SECRET;
+    if (secret) deps.discoverSecret = secret;
+    return handler(request, deps);
   };
 }
