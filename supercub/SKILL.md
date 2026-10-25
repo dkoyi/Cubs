@@ -1,6 +1,6 @@
 ---
 name: supercub
-description: Super Cub introduces the person to people at their school (and alumni) who are working on, going to, or looking for the same things, using what Cubbie learns with their approval. After they join once, introductions and contact sharing happen automatically. Use when they ask about Super Cub, "who else is going", finding teammates, study partners, mentors or collaborators, mention a new event, project, need or offer, or ask to update, set up, sync, pause, "stop noticing", "leave campus connect" or "leave super cub". Also covers match answers, alumni, feedback and check-ins.
+description: Super Cub introduces the person to people at their school (and alumni) who are working on, going to, or looking for the same things, using what Cubbie learns with their approval. After they join once, introductions and contact sharing happen automatically. Use when they ask about Super Cub, "who else is going", finding hackathon teammates, study partners, rides, food buddies, mentors or collaborators, mention a new event, project, need or offer, or ask to update, set up, sync, pause, "stop noticing", "leave campus connect" or "leave super cub". Also covers match answers, alumni, feedback and check-ins.
 ---
 
 # Super Cub
