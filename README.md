@@ -4,6 +4,8 @@
 
 Built for the Cubbie Hackathon.
 
+**[Watch the 90-second film](media/supercub-film.mp4)**
+
 ## How it works
 
 1. **Join once.** Cubbie shows one setup summary: your profile, the contact you choose to share, and the kinds of connections you want. One yes turns on automatic introductions, event sharing and a check-in every 2 hours.
