@@ -398,12 +398,13 @@ describe("auth", () => {
     expect(res.status).toBe(401);
   });
 
-  it("forgets an unused id after 30 days, and the same device can claim it again", async () => {
+  it("keeps an identity bound to its original token after years of inactivity", async () => {
     const s = newStudent();
     expect((await handleMatches(get("/api/matches", s), deps)).status).toBe(200);
     expect(await store.get(`auth:${s.id}`)).not.toBeNull();
-    nowMs += 31 * 24 * 3600 * 1000;
-    expect(await store.get(`auth:${s.id}`)).toBeNull();
+    nowMs += 3 * 365 * 24 * 3600 * 1000;
+    expect(await store.get(`auth:${s.id}`)).not.toBeNull();
+    expect((await handleMatches(get("/api/matches", { ...s, token: randomBytes(32).toString("base64url") }), deps)).status).toBe(401);
     expect((await handleMatches(get("/api/matches", s), deps)).status).toBe(200);
   });
 

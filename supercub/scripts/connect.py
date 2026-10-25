@@ -11,6 +11,9 @@ Subcommands:
   answer   answer a suggestion from sync with yes, no or later
   policy   save who can be matched with the student and what they share (sent on the next sync)
   context  show what is stored on this device and the last sync's accepted and rejected counts
+  delivered acknowledge a successfully relayed suggestion or contact message
+  connections / feedback  inspect retained connections and record an explicit outcome
+  identity export|import  privately back up or restore the same identity on another device
 
 Standard library only. Output is short plain text that Cubbie can relay. Every line that
 starts with a word in capitals (NEW MATCH, ERROR. SERVER UNAVAILABLE., ...) is mapped to a
@@ -38,8 +41,7 @@ from typing import Any, NoReturn, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Set this to the deployed server, for example "https://<your-project>.vercel.app".
-# It is empty on purpose: the script must never send a student's name and contact
-# to a server we do not run, so it refuses to send anything until this is set.
+# This is the existing Super Cub host. Keep it stable; only send after the student's consent.
 SERVER_URL = "https://supercub-server.vercel.app"
 TIMEOUT_SECONDS = 15
 # PUT /api/context can take about 60 s when the server's model judge runs. 90 s for that PUT plus
@@ -93,15 +95,17 @@ HELP_LABEL = {
 GROUP_TYPES = ("course", "campus", "event")
 
 # Sync (see research/loop-contract.md, "Signal schema" and "Policy").
-SIGNAL_TYPES = ("enrolled_in", "working_on", "attending", "interested_in", "can_help_with", "applying_to", "open_to")
+SIGNAL_TYPES = ("enrolled_in", "working_on", "attending", "interested_in", "can_help_with", "applying_to", "open_to", "looking_for", "experienced_in")
 ENTITY_KINDS = ("course", "assignment", "event", "topic", "company", "activity")
 SOURCES = ("canvas", "calendar", "email", "memory", "student")
-OPEN_TO = ("study", "teammates", "rides", "mentoring", "meals", "buddies")
-DISCOVERABLE = ("section", "school", "network")
+OPEN_TO = ("study", "teammates", "rides", "mentoring", "meals", "buddies", "advising", "collaboration")
+DISCOVERABLE = ("section", "school", "network", "alumni")
 MAX_SIGNALS = 60
 MAX_DETAIL_CHARS = 120
 MAX_LABEL_CHARS = 80
 MAX_CONTEXT_BYTES = 512 * 1024
+SKILL_RELEASE = "2026-10-profile-intros-v3"
+SETUP_CAPABILITIES = ("context_snapshot", "profile_introductions", "automatic_introductions_v1", "delivery_ack", "context_versions")
 POLICY_DEFAULTS: JsonDict = {
     "participating": False,  # only `policy --participating yes` turns this on: that is the student's yes
     "discoverable": "school",
@@ -109,6 +113,11 @@ POLICY_DEFAULTS: JsonDict = {
     "share_events": False,
     "share_applications": False,
     "max_suggestions_per_week": 1,
+    "life_stage": "student",
+    "alumni_network": False,
+    "remember_connections": False,
+    "affiliations": [],
+    "share_intro_profile": False,
 }
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 PHONE_RE = re.compile(
@@ -268,6 +277,7 @@ def api(method: str, path: str, identity: JsonDict, body: Optional[JsonDict] = N
             "Authorization": f"Bearer {identity['token']}",
             "X-Student-Id": identity["student_id"],
             "X-Student-Token": identity["token"],
+            "X-Supercub-Delivery": "acknowledged",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "campus-connect-skill/1",
@@ -283,7 +293,10 @@ def api(method: str, path: str, identity: JsonDict, body: Optional[JsonDict] = N
         message = clean(payload.get("error"), 300) or f"HTTP {e.code}"
         if e.code == 401:
             raise ConnectError(f"The campus-connect server did not accept this device ({message}).",
-                               tag="NOT RECOGNIZED", http_status=401, payload=payload) from None
+                                tag="NOT RECOGNIZED", http_status=401, payload=payload) from None
+        if e.code == 409 and message.startswith("CONTEXT CONFLICT."):
+            raise ConnectError("Another device changed your profile. Run refresh, then review current choices before syncing.",
+                               tag="CONTEXT CONFLICT", http_status=409) from None
         raise ConnectError(f"The campus-connect server said: {message}", http_status=e.code, payload=payload) from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, ValueError) as e:
         raise ServerUnavailable(_reason(e)) from None
@@ -816,10 +829,25 @@ def load_policy() -> JsonDict:
     policy = dict(POLICY_DEFAULTS)
     if isinstance(stored.get("participating"), bool):
         policy["participating"] = stored["participating"]
+    if stored.get("intro") in ("ask", "automatic", "auto_study"):
+        policy["intro"] = stored["intro"]
+    if policy["intro"] == "automatic" and isinstance(stored.get("automatic_intro_consent"), dict):
+        policy["automatic_intro_consent"] = stored["automatic_intro_consent"]
     if stored.get("discoverable") in DISCOVERABLE:
         policy["discoverable"] = stored["discoverable"]
-    if isinstance(stored.get("share_events"), bool):
-        policy["share_events"] = stored["share_events"]
+    for flag in ("share_events", "alumni_network", "remember_connections", "share_intro_profile"):
+        if isinstance(stored.get(flag), bool):
+            policy[flag] = stored[flag]
+    if stored.get("life_stage") in ("student", "alumni"):
+        policy["life_stage"] = stored["life_stage"]
+    policy["affiliations"] = _strings(stored.get("affiliations"))[:5]
+    cap = stored.get("max_suggestions_per_week")
+    if type(cap) is int and 0 <= cap <= 7:
+        policy["max_suggestions_per_week"] = cap
+    if not policy["alumni_network"]:
+        policy["remember_connections"] = False
+        if policy["discoverable"] == "alumni":
+            policy["discoverable"] = "school"
     return policy
 
 
@@ -829,22 +857,56 @@ def _yes(value: str) -> bool:
 
 def describe_policy(policy: JsonDict) -> str:
     who = {"section": "people in your classes", "school": "anyone at your school",
-           "network": "anyone on Super Cub"}[policy["discoverable"]]
+           "network": "anyone on Super Cub", "alumni": "your approved university and alumni networks"}[policy["discoverable"]]
     return (f"Participating: {'yes' if policy['participating'] else 'no'}. Matched with: {who}. "
-            f"Share events: {'yes' if policy['share_events'] else 'no'}.")
+             f"Share events: {'yes' if policy['share_events'] else 'no'}. "
+             f"Life stage: {policy['life_stage']}. Alumni network: {'yes' if policy['alumni_network'] else 'no'}. "
+             f"Remember connections: {'yes' if policy['remember_connections'] else 'no'}. "
+             f"Share intro profile: {'yes' if policy['share_intro_profile'] else 'no'}. Introductions: {policy['intro']}.")
 
 
 def cmd_policy(args: argparse.Namespace) -> list[str]:
-    if args.participating is None and args.discoverable is None and args.share_events is None:
-        raise UsageError("give at least one of --participating, --discoverable, --share-events")
+    fields = ("participating", "discoverable", "share_events", "alumni_network", "remember_connections", "life_stage", "affiliation", "max_per_week", "share_profile", "intro")
+    if all(getattr(args, field) is None for field in fields) and not args.clear_affiliations:
+        raise UsageError("give at least one policy flag, such as --participating or --alumni-network")
     stored = _read_json(data_dir() / "policy.json") or {}
+    if args.intro == "ask" or args.participating == "no" or any(getattr(args, flag) is not None for flag in ("discoverable", "alumni_network", "share_events", "affiliation", "max_per_week")) or args.clear_affiliations:
+        if stored.get("intro") == "automatic":
+            stored["intro"] = "ask"
+        stored.pop("automatic_intro_consent", None)
+    if args.intro == "ask":
+        stored["intro"] = "ask"
     if args.participating is not None:
         stored["participating"] = _yes(args.participating)
     if args.discoverable is not None:
         stored["discoverable"] = args.discoverable
     if args.share_events is not None:
         stored["share_events"] = _yes(args.share_events)
+    if args.share_profile is not None:
+        stored["share_intro_profile"] = _yes(args.share_profile)
+    for flag in ("alumni_network", "remember_connections"):
+        if getattr(args, flag) is not None:
+            stored[flag] = _yes(getattr(args, flag))
+    if args.life_stage is not None:
+        stored["life_stage"] = args.life_stage
+    if args.clear_affiliations:
+        stored["affiliations"] = []
+    if args.affiliation is not None:
+        if len(args.affiliation) > 5 or any(not item.strip() or len(item) > 60 for item in args.affiliation):
+            raise UsageError("give at most 5 short school affiliations")
+        stored["affiliations"] = list(dict.fromkeys(args.affiliation))
+    if args.max_per_week is not None:
+        stored["max_suggestions_per_week"] = args.max_per_week
+    if args.alumni_network == "no":
+        stored["remember_connections"] = False
+        if stored.get("discoverable") == "alumni":
+            stored["discoverable"] = "school"
+    if (stored.get("discoverable") == "alumni" or stored.get("remember_connections")) and not stored.get("alumni_network"):
+        raise UsageError("alumni scope and retained connections require --alumni-network yes after explicit consent")
     _write_json(data_dir() / "policy.json", stored)
+    state = load_state()
+    state.pop("opt_out_sent", None)  # changed permissions must sync even while paused
+    save_state(state)
     return [f"POLICY SAVED. {describe_policy(load_policy())} It goes to the server on the next sync."]
 
 
@@ -897,18 +959,28 @@ def clean_signal(raw: object, policy: JsonDict, tz: Optional[tzinfo], now: datet
     entity_kind = entity.get("kind")
     if kind_of not in SIGNAL_TYPES or entity_kind not in ENTITY_KINDS:
         return None
-    # Events mined from calendar or email need the student's events answer. Events the student
-    # told Cubbie about directly (source memory or student) are always allowed.
-    mined = raw.get("source") not in ("memory", "student")
-    if not policy["share_events"] and mined and (kind_of == "attending" or entity_kind == "event"):
+    # Mentioning something in chat does not grant permission to publish it.
+    if not policy["share_events"] and (kind_of == "attending" or entity_kind == "event"):
         return None
     if not policy["share_applications"] and (kind_of == "applying_to" or entity_kind == "company"):
+        return None
+    if kind_of in ("can_help_with", "open_to", "looking_for", "experienced_in") and raw.get("source") not in ("memory", "student"):
         return None
     label = _safe_text(entity.get("label") or entity.get("key"), MAX_LABEL_CHARS)
     if not label:
         return None
     if kind_of == "open_to" and label.lower() not in OPEN_TO:
         return None
+    confirmed = _iso(raw.get("confirmed_at"), tz)
+    if policy["alumni_network"] and kind_of in ("can_help_with", "open_to", "looking_for") and confirmed is None:
+        return None
+    if confirmed is not None:
+        moment = datetime.fromisoformat(confirmed)
+        if moment > now + timedelta(minutes=5):
+            return None
+        days = 30 if kind_of == "looking_for" else 60
+        if kind_of in ("can_help_with", "open_to", "looking_for") and moment + timedelta(days=days) <= now:
+            return None
     signal: JsonDict = {
         "type": kind_of,
         "entity": {"kind": entity_kind, "key": label, "label": label},
@@ -918,6 +990,15 @@ def clean_signal(raw: object, policy: JsonDict, tz: Optional[tzinfo], now: datet
     detail = _safe_text(raw.get("detail"), MAX_DETAIL_CHARS)
     if detail:
         signal["detail"] = detail
+    if confirmed is not None:
+        signal["confirmed_at"] = confirmed
+    if "topics" in raw:
+        if not isinstance(raw["topics"], list) or len(raw["topics"]) > 5:
+            return None
+        topics = [_safe_text(item, 60) for item in raw["topics"]]
+        if any(not topic for topic in topics):
+            return None
+        signal["topics"] = topics
     for field in ("when", "due"):
         moment = _iso(raw.get(field), tz)
         if moment:
@@ -953,31 +1034,152 @@ def build_context(ctx: JsonDict, policy: JsonDict, now: datetime) -> tuple[JsonD
                                "Fix: use a name like America/Phoenix.", tag="BAD CONTEXT") from None
     given = ctx.get("policy") if isinstance(ctx.get("policy"), dict) else {}
     full_policy = dict(policy)
+    if policy["share_intro_profile"]:
+        full_policy["intro_profile"] = clean_intro_profile(given.get("intro_profile"))
     for field, limit in (("first_name", 40), ("school", 60), ("contact", 100)):
         value = clean(given.get(field), limit)
         if value:
             full_policy[field] = value
+        elif field in ("school", "contact") and given.get(field) == "":
+            full_policy[field] = ""  # explicit withdrawal must reach the server
+    if full_policy["intro"] == "automatic":
+        consent = full_policy.get("automatic_intro_consent")
+        normalize = lambda value: re.sub(r"[^\w\s]", "", str(value).lower()).strip()
+        valid = isinstance(consent, dict) and consent.get("contact") == full_policy.get("contact")
+        if valid:
+            valid = all(consent.get(flag) == full_policy.get(flag) for flag in ("discoverable", "alumni_network", "share_events", "share_applications"))
+            valid = valid and normalize(consent.get("school", "")) == normalize(full_policy.get("school", ""))
+            valid = valid and sorted(map(normalize, consent.get("affiliations", []))) == sorted(map(normalize, full_policy.get("affiliations", [])))
+            valid = valid and type(consent.get("max_suggestions_per_week")) is int and full_policy["max_suggestions_per_week"] <= consent["max_suggestions_per_week"]
+            approved = _moment(consent.get("approved_at"))
+            valid = valid and approved is not None and approved <= now + timedelta(minutes=5) and approved + timedelta(days=365) > now
+        if not valid:
+            full_policy["intro"] = "ask"
+            full_policy.pop("automatic_intro_consent", None)
     raw_signals = ctx.get("signals") if isinstance(ctx.get("signals"), list) else []
     signals = [s for s in (clean_signal(r, policy, tz, now) for r in raw_signals) if s is not None]
     skipped = len(raw_signals) - len(signals)
     if len(signals) > MAX_SIGNALS:
         skipped += len(signals) - MAX_SIGNALS
         signals = signals[:MAX_SIGNALS]
-    body: JsonDict = {"policy": full_policy, "signals": signals, "free": _free_windows(ctx.get("free"), tz, now)}
+    body: JsonDict = {"policy": full_policy, "signals": signals, "replace_signals": True,
+                      "free": _free_windows(ctx.get("free"), tz, now)}
     if tz_name:
         body["tz"] = tz_name
     return body, skipped
 
 
+def _profile_url(value: object, kind: str = "website") -> str:
+    if not isinstance(value, str) or len(value) > 400 or any(c.isspace() for c in value):
+        return ""
+    try:
+        url = urllib.parse.urlsplit(value)
+        host = (url.hostname or "").lower()
+        if (url.scheme != "https" or url.username or url.password or url.port or url.query or url.fragment
+                or "." not in host or re.fullmatch(r"[\d.]+", host) or ":" in host
+                or re.search(r"(?:^|\.)(?:localhost|local|internal)$", host)):
+            return ""
+        if kind == "linkedin" and (host not in ("linkedin.com", "www.linkedin.com") or not re.fullmatch(r"/in/[^/]+/?", url.path)):
+            return ""
+        if kind == "github" and host not in ("github.com", "www.github.com"):
+            return ""
+        return value
+    except ValueError:
+        return ""
+
+
+def clean_intro_profile(raw: object) -> JsonDict:
+    if not isinstance(raw, dict):
+        raise ConnectError("Add the approved intro profile to policy.intro_profile before sharing it.", tag="BAD CONTEXT")
+    profile: JsonDict = {"links": []}
+    for field, limit in (("name", 60), ("headline", 100), ("about", 240)):
+        value = raw.get(field)
+        if field != "name" and value in (None, ""):
+            continue
+        if (not isinstance(value, str) or not value.strip() or len(value) > limit or
+                EMAIL_RE.search(value) or PHONE_RE.search(value) or re.search(r"[<>`@]", value)):
+            raise ConnectError(f"The approved profile {field} is missing, too long or contains contact details.", tag="BAD CONTEXT")
+        profile[field] = clean(value, limit)
+    links = raw.get("links", [])
+    if not isinstance(links, list) or len(links) > 3:
+        raise ConnectError("An intro profile can contain up to three public links.", tag="BAD CONTEXT")
+    for link in links:
+        if not isinstance(link, dict) or link.get("kind") not in ("linkedin", "github", "website"):
+            raise ConnectError("Use linkedin, github or website profile links.", tag="BAD CONTEXT")
+        url = _profile_url(link.get("url"), link["kind"])
+        if not url:
+            raise ConnectError("Use public HTTPS profile links without private queries or credentials.", tag="BAD CONTEXT")
+        profile["links"].append({"kind": link["kind"], "url": url})
+    if raw.get("photo_url"):
+        url = _profile_url(raw["photo_url"])
+        if not url:
+            raise ConnectError("Use an approved public HTTPS photo URL.", tag="BAD CONTEXT")
+        profile["photo_url"] = url
+    return profile
+
+
+def _ask_lines(ask: JsonDict) -> list[str]:
+    lines = [f"ASK {clean(ask.get('id'), 60)}", clean(ask.get("text"), 400)]
+    raw = ask.get("profile")
+    if not isinstance(raw, dict):
+        return lines
+    try:
+        profile = clean_intro_profile(raw)
+    except ConnectError:
+        return lines
+    lines.append(f"Profile: {profile['name']}")
+    for field in ("headline", "about"):
+        if profile.get(field):
+            lines.append(f"{field.title()}: {profile[field]}")
+    for link in profile["links"]:
+        label = {"linkedin": "LinkedIn", "github": "GitHub", "website": "Website"}[link["kind"]]
+        lines.append(f"{label}: {link['url']}")
+    if profile.get("photo_url"):
+        lines.append(f"Photo: {profile['photo_url']}")
+    lines.append("Their permission: automatic introductions" if ask.get("other_consent") == "standing" else f"Their answer: {'yes' if ask.get('other_accepted') else 'pending'}")
+    lines.append(f"Your answer: {'yes' if ask.get('you_accepted') else 'pending'}")
+    return lines
+
+
+def cmd_preview(args: argparse.Namespace) -> list[str]:
+    identity = load_identity(create=False)
+    if identity is None:
+        raise ConnectError("Super Cub isn't set up on this device.", tag="NOT JOINED")
+    try:
+        result = api("GET", f"/api/suggestions?id={urllib.parse.quote(args.id, safe='')}", identity)
+    except ConnectError as error:
+        if error.http_status in (404, 410):
+            return ["CLOSED. That introduction is no longer open."]
+        raise
+    ask = result.get("ask")
+    return _ask_lines(ask) if isinstance(ask, dict) else ["CLOSED. That introduction is no longer open."]
+
+
 def _agreed_lines(item: JsonDict, tz: tzinfo) -> list[str]:
     name = clean(item.get("first_name"), 40) or "The other student"
     lines = [
-        "AGREED",
+        f"AGREED {clean(item.get('id'), 60)}".rstrip(),
         clean(item.get("text"), 400) or f"You're on. {name} said yes too.",
         clean(item.get("contact"), 100) or "No contact given.",
     ]
     if isinstance(item.get("when"), dict):
         lines.append(f"Calendar times: {iso_range(item['when'], tz)}")
+    if clean(item.get("reason"), 350):
+        lines.append(f"Connection reason: {clean(item.get('reason'), 350)}")
+    raw_profile = item.get("profile")
+    if isinstance(raw_profile, dict):
+        try:
+            profile = clean_intro_profile(raw_profile)
+        except ConnectError:
+            pass
+        else:
+            lines.append(f"Profile: {profile['name']}")
+            if profile.get("headline"):
+                lines.append(f"Headline: {profile['headline']}")
+            if profile.get("about"):
+                lines.append(f"About: {profile['about']}")
+            for link in profile["links"]:
+                lines.append(f"{link['kind'].title()}: {link['url']}")
     return lines
 
 
@@ -995,23 +1197,40 @@ def cmd_sync(args: argparse.Namespace) -> list[str]:
     state = load_state()
     if not policy["participating"]:
         identity = load_identity(create=False)
-        if identity is not None and state.get("last_sync"):
-            # They were sharing before: tell the server to stop, and send nothing else.
-            api("PUT", "/api/context", identity, {"policy": policy, "signals": [], "free": []},
-                timeout=SYNC_PUT_TIMEOUT_SECONDS)
+        if identity is not None and state.get("opt_out_sent") is not True:
+            # A timed-out PUT may have reached the server without saving last_sync locally.
+            # Revoke once whenever an existing identity might have published context.
+            revoked = {**policy, "intro": "ask"}
+            revoked.pop("automatic_intro_consent", None)
+            result = api("PUT", "/api/context", identity,
+                         {"policy": revoked, "signals": [], "free": [], "context_version": state.get("context_version")},
+                         timeout=SYNC_PUT_TIMEOUT_SECONDS)
+            if isinstance(result.get("context_version"), str):
+                state["context_version"] = result["context_version"]
             state.pop("last_sync", None)
+            state["opt_out_sent"] = True
             save_state(state)
         return ["NOT PARTICIPATING. Nothing was shared."]
 
     ctx = read_context(Path(args.file).expanduser())
     now = utc_now()
     body, skipped = build_context(ctx, policy, now)
+    body["context_version"] = state.get("context_version")
+    release = getattr(args, "client_release", None) or (SKILL_RELEASE if policy["intro"] == "automatic" else None)
+    if release:
+        body["client_release"] = release
     if body.get("tz"):
         state["tz"] = body["tz"]
     identity = load_identity(create=True)
     if identity is None:
         raise ConnectError("Could not create a campus-connect identity on this device.")
+    state.pop("opt_out_sent", None)
+    save_state(state)  # persist the need to revoke even if the PUT response is lost
     result = api("PUT", "/api/context", identity, body, timeout=SYNC_PUT_TIMEOUT_SECONDS)
+    if release and (result.get("skill_release") != release or result.get("intro_mode") != body["policy"]["intro"]):
+        raise ConnectError("The server did not confirm this release and introduction mode. Do not claim setup succeeded.", tag="UPDATE REQUIRED")
+    if isinstance(result.get("context_version"), str):
+        state["context_version"] = result["context_version"]
     rejected = [
         f"#{clean(r.get('index'), 5)} {clean(r.get('reason'), 120)}" for r in _dicts(result.get("rejected"))
     ]
@@ -1033,15 +1252,13 @@ def cmd_sync(args: argparse.Namespace) -> list[str]:
     for item in _dicts(found.get("agreed")):
         sid = clean(item.get("id"), 60) or clean(item.get("text"), 60)
         if sid and seen.get(sid) != "agreed":
-            _remember_suggestion(state, sid, "agreed")
             lines = _agreed_lines(item, tz)
             break
     else:
         ask = found.get("ask") if isinstance(found.get("ask"), dict) else {}
         sid, text = clean(ask.get("id"), 60), clean(ask.get("text"), 400)
         if sid and text and sid not in seen:
-            _remember_suggestion(state, sid, "asked")
-            lines = [f"ASK {sid}", text]
+            lines = _ask_lines(ask)
     save_state(state)
     return lines
 
@@ -1065,9 +1282,7 @@ def cmd_answer(args: argparse.Namespace) -> list[str]:
         raise
     status = result.get("status")
     if status == "agreed":
-        _remember_suggestion(state, sid, "agreed")
-        save_state(state)
-        return _agreed_lines(result, _student_tz(state))
+        return _agreed_lines({**result, "id": sid}, _student_tz(state))
     if status == "passed":
         return ["PASSED"]
     if args.answer == "later":
@@ -1082,9 +1297,99 @@ def cmd_answer(args: argparse.Namespace) -> list[str]:
     raise ServerUnavailable("unreadable reply")
 
 
+def cmd_delivered(args: argparse.Namespace) -> list[str]:
+    identity = load_identity(create=False)
+    if identity is None:
+        raise ConnectError("Super Cub isn't set up on this device.", tag="NOT JOINED")
+    sid = clean(args.id, 60)
+    api("POST", f"/api/suggestions/{urllib.parse.quote(sid, safe='')}/delivered", identity, {"kind": args.kind})
+    state = load_state()
+    _remember_suggestion(state, sid, "agreed" if args.kind == "agreed" else "asked")
+    save_state(state)
+    return ["DELIVERED. Relay acknowledgment saved."]
+
+
+def cmd_connections(args: argparse.Namespace) -> list[str]:
+    identity = load_identity(create=False)
+    if identity is None:
+        raise ConnectError("Super Cub isn't set up on this device.", tag="NOT JOINED")
+    if args.command == "feedback":
+        api("POST", "/api/connections", identity, {"id": args.id, "outcome": args.outcome})
+        return ["FEEDBACK SAVED. Your outcome stays private."]
+    result = api("GET", "/api/connections", identity)
+    lines = ["CONNECTIONS. Retained introductions, with your own feedback only."]
+    for item in _dicts(result.get("connections"))[:50]:
+        feedback = item.get("feedback") if isinstance(item.get("feedback"), dict) else {}
+        lines.append(f"Connection id: {clean(item.get('id'), 60)}. Last connected: {clean(item.get('last_connected_at'), 30)}. "
+                     f"Introductions: {clean(item.get('introductions'), 8)}. "
+                     f"Met: {feedback.get('met')}. Useful: {feedback.get('useful')}.")
+    if len(lines) == 1:
+        lines.append("No retained connections.")
+    return lines
+
+
+def cmd_identity(args: argparse.Namespace) -> list[str]:
+    path = Path(args.file).expanduser()
+    if args.action == "export":
+        identity = load_identity(create=False)
+        if identity is None:
+            raise ConnectError("No identity to back up.", tag="NOT JOINED")
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "server": server_url(), "identity": identity}, f)
+        except OSError:
+            raise ConnectError("Choose a new private backup file in an existing folder.", tag="BAD IDENTITY") from None
+        return ["IDENTITY EXPORTED. Keep the backup private; it grants access to your Super Cub account. Never paste it into chat."]
+    backup = read_context(path)
+    identity = backup.get("identity")
+    if not isinstance(identity, dict) or not isinstance(identity.get("token"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{32,200}", identity["token"]):
+        raise ConnectError("This is not a valid identity backup.", tag="BAD IDENTITY")
+    try:
+        uuid.UUID(identity.get("student_id", ""))
+    except (ValueError, TypeError, AttributeError):
+        raise ConnectError("This is not a valid identity backup.", tag="BAD IDENTITY") from None
+    if backup.get("version") != 1 or backup.get("server") != server_url():
+        raise ConnectError("The backup belongs to a different service or version.", tag="BAD IDENTITY")
+    existing = load_identity(create=False)
+    if existing is not None and existing != identity:
+        raise ConnectError("This device already has another identity. Restore on a fresh device.", tag="BAD IDENTITY")
+    if context_path().exists() and existing is None:
+        raise ConnectError("This device already has a context file. Restore on a fresh device.", tag="BAD IDENTITY")
+    # Verify the token and load current remote choices before writing any credentials locally.
+    context = api("GET", "/api/context", identity)
+    if not isinstance(context.get("policy"), dict):
+        raise ServerUnavailable("profile could not be read")
+    context_path().parent.mkdir(parents=True, exist_ok=True)
+    _write_json(context_path(), context)
+    _write_json(data_dir() / "policy.json", context["policy"])
+    _write_json(data_dir() / "identity.json", identity)
+    save_state({"context_version": context.get("context_version")})
+    return ["IDENTITY RESTORED. Your current sharing choices were recovered. Review them before your next sync."]
+
+
+def cmd_refresh(_args: argparse.Namespace) -> list[str]:
+    identity = load_identity(create=False)
+    if identity is None:
+        raise ConnectError("No identity to refresh.", tag="NOT JOINED")
+    context = api("GET", "/api/context", identity)
+    if not isinstance(context.get("policy"), dict):
+        raise ServerUnavailable("profile could not be read")
+    context_path().parent.mkdir(parents=True, exist_ok=True)
+    _write_json(context_path(), context)
+    _write_json(data_dir() / "policy.json", context["policy"])
+    state = load_state()
+    state["context_version"] = context.get("context_version")
+    state.pop("opt_out_sent", None)
+    save_state(state)
+    return ["PROFILE REFRESHED. Current remote choices and signals replaced this device's snapshot. Review before syncing."]
+
+
 def cmd_context(args: argparse.Namespace) -> list[str]:
     policy = load_policy()
     lines = [f"POLICY. {describe_policy(policy)}"]
+    setup_release = load_state().get("setup_release")
+    lines.append(f"Setup release: {clean(setup_release, 80)}." if setup_release else "Setup release: not yet approved for this version.")
     path = Path(args.file).expanduser()
     try:
         ctx = read_context(path)
@@ -1097,10 +1402,18 @@ def cmd_context(args: argparse.Namespace) -> list[str]:
             lines.append(e.line())
         else:
             lines.append(f"Context file: {len(body['signals'])} signals to send, {skipped} left out here, "
-                         f"{len(body['free'])} free times.")
+                          f"{len(body['free'])} free times.")
+            lines.append(f"Prepared introductions: {body['policy']['intro']}.")
             for s in body["signals"]:
                 extra = f" ({s['detail']})" if s.get("detail") else ""
                 lines.append(f"- {s['type']} {s['entity']['kind']}: {s['entity']['label']}{extra}")
+            profile = body["policy"].get("intro_profile")
+            if isinstance(profile, dict):
+                lines.append(f"Intro profile: {profile['name']}" + (f". {profile['headline']}" if profile.get("headline") else ""))
+                if profile.get("about"):
+                    lines.append(f"About: {profile['about']}")
+                for link in profile["links"]:
+                    lines.append(f"{link['kind']}: {link['url']}")
     last = load_state().get("last_sync")
     if isinstance(last, dict):
         lines.append(f"Last sync: {clean(last.get('at'), 40)}. Sent {clean(last.get('sent'), 5)}, "
@@ -1110,6 +1423,65 @@ def cmd_context(args: argparse.Namespace) -> list[str]:
     else:
         lines.append("No sync yet.")
     return lines
+
+
+def cmd_setup(args: argparse.Namespace) -> list[str]:
+    """Apply one actually approved summary, preserving the person's existing identity."""
+    ctx = read_context(Path(args.file).expanduser())
+    given = ctx.get("policy") if isinstance(ctx.get("policy"), dict) else {}
+    if given.get("participating") is not True or given.get("intro") not in ("ask", "automatic"):
+        raise ConnectError("The approved setup must explicitly choose participation and introduction mode.", tag="BAD CONTEXT")
+    at = _iso(args.approved_at, timezone.utc)
+    if not at or datetime.fromisoformat(at) > utc_now() + timedelta(minutes=5) or datetime.fromisoformat(at) + timedelta(days=365) <= utc_now():
+        raise ConnectError("Use the actual recent setup approval timestamp, not an invented or expired date.", tag="BAD CONTEXT")
+    policy = load_policy()
+    for flag in ("participating", "discoverable", "intro", "share_events", "share_intro_profile", "alumni_network", "remember_connections", "life_stage", "affiliations", "max_suggestions_per_week"):
+        if flag in given:
+            policy[flag] = given[flag]
+    if (any(type(policy[flag]) is not bool for flag in ("participating", "share_events", "share_intro_profile", "alumni_network", "remember_connections")) or
+            policy["discoverable"] not in DISCOVERABLE or policy["life_stage"] not in ("student", "alumni") or
+            type(policy["max_suggestions_per_week"]) is not int or not 0 <= policy["max_suggestions_per_week"] <= 7 or
+            not isinstance(policy["affiliations"], list) or len(policy["affiliations"]) > 5 or
+            any(not isinstance(school, str) or not school.strip() or len(school) > 60 for school in policy["affiliations"]) or
+            not clean(given.get("first_name"), 40) or
+            (policy["discoverable"] in ("school", "section") and not clean(given.get("school"), 60)) or
+            ((policy["remember_connections"] or policy["discoverable"] == "alumni") and not policy["alumni_network"])):
+        raise ConnectError("The approved summary needs valid identity, scope and sharing choices.", tag="BAD CONTEXT")
+    if policy["share_applications"] or given.get("share_applications") not in (None, False):
+        raise ConnectError("Application sharing remains off in this client.", tag="BAD CONTEXT")
+    policy.pop("automatic_intro_consent", None)
+    if policy["intro"] == "automatic":
+        contact = clean(given.get("contact"), 100)
+        if not contact or not (EMAIL_RE.fullmatch(contact) or re.fullmatch(r"\+?[1-9]\d{7,14}", re.sub(r"[\s().-]", "", contact))):
+            raise ConnectError("Automatic introductions require the person's explicitly chosen contact.", tag="BAD CONTEXT")
+        activities = list(dict.fromkeys(clean(s.get("entity", {}).get("label"), 80).lower() for s in _dicts(ctx.get("signals"))
+                                        if s.get("type") == "open_to" and isinstance(s.get("entity"), dict) and s.get("source") in ("student", "memory")))
+        if not activities or any(activity not in OPEN_TO for activity in activities):
+            raise ConnectError("The approved summary must name at least one connection activity.", tag="BAD CONTEXT")
+        policy["automatic_intro_consent"] = {"approved_at": at, "contact": contact, "discoverable": policy["discoverable"],
+            "school": clean(given.get("school"), 60), "affiliations": policy["affiliations"], "alumni_network": policy["alumni_network"],
+            "share_events": policy["share_events"], "share_applications": False, "activities": activities,
+            "max_suggestions_per_week": policy["max_suggestions_per_week"]}
+    build_context(ctx, policy, utc_now())  # local validation before saving or making a network mutation
+    identity = load_identity(create=False) or {"student_id": "", "token": ""}
+    try:
+        metadata = api("GET", "/api/capabilities", identity, timeout=5)
+    except ConnectError as error:
+        if error.http_status == 404:
+            raise ConnectError("Publish the matching server release before running this Skill setup. Existing settings were not changed.", tag="UPDATE REQUIRED") from None
+        raise
+    if metadata.get("skill_release") != SKILL_RELEASE or not all(capability in _strings(metadata.get("capabilities")) for capability in SETUP_CAPABILITIES):
+        raise ConnectError("The server has not confirmed this release. Existing settings were not changed.", tag="UPDATE REQUIRED")
+    _write_json(data_dir() / "policy.json", policy)
+    state = load_state()
+    state.pop("opt_out_sent", None)
+    save_state(state)
+    lines = cmd_sync(argparse.Namespace(file=args.file, client_release=SKILL_RELEASE))
+    state = load_state()
+    state["setup_release"] = SKILL_RELEASE
+    state["setup_approved_at"] = at
+    save_state(state)
+    return [f"SETUP COMPLETE. {SKILL_RELEASE}. Introductions: {policy['intro']}.", *lines]
 
 
 # ---------- entry point ----------
@@ -1156,7 +1528,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(run=cmd_status)
 
     sync = sub.add_parser("sync", help="share the context file, then report at most one suggestion")
-    sync.add_argument("--file", required=True, help="the context JSON Cubbie wrote")
+    sync.add_argument("--file", default=str(context_path()), help="the context JSON Cubbie wrote")
     sync.set_defaults(run=cmd_sync)
 
     answer_cmd = sub.add_parser("answer", help="answer a suggestion from sync")
@@ -1168,7 +1540,44 @@ def build_parser() -> argparse.ArgumentParser:
     policy.add_argument("--participating", choices=("yes", "no"))
     policy.add_argument("--discoverable", choices=DISCOVERABLE)
     policy.add_argument("--share-events", choices=("yes", "no"))
+    policy.add_argument("--share-profile", choices=("yes", "no"))
+    policy.add_argument("--intro", choices=("ask",), help="revoke automatic introductions; granting them requires approved setup")
+    policy.add_argument("--alumni-network", choices=("yes", "no"))
+    policy.add_argument("--remember-connections", choices=("yes", "no"))
+    policy.add_argument("--life-stage", choices=("student", "alumni"))
+    policy.add_argument("--affiliation", action="append", help="approved school affiliation; repeat to replace the list")
+    policy.add_argument("--clear-affiliations", action="store_true")
+    policy.add_argument("--max-per-week", type=int, choices=range(8))
     policy.set_defaults(run=cmd_policy)
+
+    setup = sub.add_parser("setup", help="apply one approved sharing summary and sync without changing identity")
+    setup.add_argument("--file", required=True)
+    setup.add_argument("--approved-at", required=True, help="actual time the person approved the displayed setup")
+    setup.set_defaults(run=cmd_setup)
+
+    delivered = sub.add_parser("delivered", help="acknowledge a message only after relaying it")
+    delivered.add_argument("id")
+    delivered.add_argument("kind", choices=("ask", "agreed"))
+    delivered.set_defaults(run=cmd_delivered)
+
+    preview = sub.add_parser("preview", help="show current introduction details for a follow-up question")
+    preview.add_argument("id")
+    preview.set_defaults(run=cmd_preview)
+
+    connections = sub.add_parser("connections", help="show retained introductions and your own feedback")
+    connections.set_defaults(run=cmd_connections)
+    feedback = sub.add_parser("feedback", help="record an explicit outcome for a retained connection")
+    feedback.add_argument("id")
+    feedback.add_argument("outcome", choices=("met", "did_not_meet", "useful", "not_useful", "reset"))
+    feedback.set_defaults(run=cmd_connections)
+
+    identity = sub.add_parser("identity", help="privately back up or restore your identity")
+    identity.add_argument("action", choices=("export", "import"))
+    identity.add_argument("--file", required=True)
+    identity.set_defaults(run=cmd_identity)
+
+    refresh = sub.add_parser("refresh", help="recover current remote choices after a stale-device conflict")
+    refresh.set_defaults(run=cmd_refresh)
 
     context = sub.add_parser("context", help="show what is stored here and the last sync")
     context.add_argument("--file", default=str(context_path()), help="the context JSON to show")

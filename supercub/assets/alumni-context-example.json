@@ -1,0 +1,10 @@
+{
+  "tz": "America/Phoenix",
+  "policy": { "first_name": "Alex", "school": "", "contact": "alex@example.edu" },
+  "signals": [
+    { "type": "working_on", "entity": { "kind": "topic", "label": "healthcare product" }, "source": "student", "topics": ["healthcare"] },
+    { "type": "looking_for", "entity": { "kind": "topic", "label": "healthcare product advice" }, "source": "student", "topics": ["healthcare"], "confirmed_at": "2028-10-24T16:00:00Z" },
+    { "type": "open_to", "entity": { "kind": "activity", "label": "advising" }, "source": "student", "confirmed_at": "2028-10-24T16:00:00Z" }
+  ],
+  "free": []
+}

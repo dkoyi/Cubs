@@ -5,7 +5,7 @@
 // The model never sees names, contacts or free-text details, only signal types and entity labels.
 // Its output is untrusted: callers must run guardText on both texts before storing them.
 
-import type { JudgeSignal } from "./discovery.js";
+import type { ConnectionEvidence, JudgeSignal } from "./discovery.js";
 
 export interface JudgeRequest {
   /** "type:key" signals both students have. */
@@ -13,6 +13,8 @@ export interface JudgeRequest {
   a: JudgeSignal[];
   b: JudgeSignal[];
   prefilter: number;
+  evidence?: ConnectionEvidence[];
+  reconnecting?: boolean;
 }
 
 /** What the model returned, after a shape check. Texts are still unguarded. */
@@ -36,7 +38,7 @@ const MAX_TOKENS = 2000;
 const DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
 const DEFAULT_BEDROCK_MODEL = "us.anthropic.claude-opus-5-5";
 
-export const SYSTEM_PROMPT = `You decide whether two university students should be offered an introduction by their campus assistants, and you write the one-line offer each of them will read.
+export const SYSTEM_PROMPT = `You decide whether two people in a university and alumni network should be offered an introduction by their personal assistants, and write the one-line offer each will read. Their lives can evolve years after graduation.
 
 You get the signals both students shared (types like enrolled_in or working_on, with entity labels like "CSE 310" or "HW4") and the list of signals they have in common.
 
@@ -44,9 +46,12 @@ Return only a JSON object, no other text:
 {"worth": <number 0 to 1>, "why": "<one sentence for the operator on why this pair is or is not worth introducing>", "text_for_a": "<message for student A>", "text_for_b": "<message for student B>"}
 
 How to judge worth: high when they share a course and a current assignment, an upcoming event, or one can help with what the other is working on; low when the overlap is incidental.
+Prioritize why this connection helps now: a current request paired with an explicit offer, complementary current work, or a concrete shared deadline. University affiliation or generic interests alone are weak reasons. experienced_in is background, NEVER an offer to help. A working_on signal is not proof of a request or enrollment.
+Evidence describes shared subjects, directional offers and optional time-to-deadline. Use only those facts. course_link means one is enrolled and the other has course-related work; never call them classmates without enrolled_in on BOTH sides. For a reconnection, explain the new current reason without revealing the previous connection's identity.
 
 Hard rules for text_for_a and text_for_b:
 - Mention only entities that appear in the shared list, that is entities BOTH students have. Never mention anything only one of them shared.
+- Shared evidence labels are also allowed; these can be canonical subjects aligning differently worded approved signals. Never invent credentials, experience, urgency, friendship, availability or willingness.
 - Never include a name, an email address, a phone number, a link, or any way to contact someone. Refer to the other student as "someone".
 - Address the reader as "you". One or two short sentences, under 300 characters, plain text.
 - End with: "Want me to see if you'd both like to connect?"
@@ -59,6 +64,8 @@ export function userPrompt(request: JudgeRequest): string {
     student_a: request.a,
     student_b: request.b,
     rules_prefilter_score: request.prefilter,
+    evidence: request.evidence ?? [],
+    reconnecting: request.reconnecting ?? false,
   });
 }
 

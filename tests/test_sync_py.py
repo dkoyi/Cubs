@@ -65,6 +65,10 @@ class SyncBase(ConnectPyBase):
     def sync(self) -> tuple[int, str]:
         return self.run_cli("sync", "--file", str(self.context_file))
 
+    def delivered(self, sid: str, kind: str) -> tuple[int, str]:
+        self.stub.responses[("POST", f"/api/suggestions/{sid}/delivered")] = (200, {"delivered": True})
+        return self.run_cli("delivered", sid, kind)
+
     def write_context(self, value: Any) -> None:
         self.context_file.write_text(json.dumps(value))
 
@@ -119,8 +123,10 @@ class SyncTests(SyncBase):
         self.assertEqual(body["policy"], {
             "participating": True, "discoverable": "school", "intro": "ask", "share_events": False,
             "share_applications": False, "max_suggestions_per_week": 1,
+            "life_stage": "student", "alumni_network": False, "remember_connections": False, "affiliations": [], "share_intro_profile": False,
             "first_name": "Alex", "school": "ASU", "contact": "alex@example.edu"})
         self.assertEqual(len(body["free"]), 2)
+        self.assertIs(body["replace_signals"], True)
         types = [s["type"] for s in body["signals"]]
         # share_events is off, so the hackathon stays on this device.
         self.assertEqual(types, ["enrolled_in", "working_on", "interested_in", "can_help_with", "open_to"])
@@ -130,10 +136,12 @@ class SyncTests(SyncBase):
         self.assertEqual(hw["source"], "canvas")
         self.assertEqual(hw["observed_at"], "2026-10-24T16:00:00+00:00")
 
-    def test_same_ask_is_not_repeated_on_the_next_sync(self) -> None:
+    def test_same_ask_is_repeated_until_delivery_is_acknowledged(self) -> None:
         self.opt_in()
         self.stub_sync(ask=ASK)
         self.sync()
+        self.assertIn("ASK sug-1", self.sync()[1])
+        self.delivered("sug-1", "ask")
         code, out = self.sync()
         self.assertEqual(code, 0, out)
         self.assertEqual(out.strip(), "NOTHING NEW")
@@ -150,8 +158,10 @@ class SyncTests(SyncBase):
         code, out = self.sync()
         self.assertEqual(code, 0, out)
         lines = out.strip().splitlines()
-        self.assertEqual(lines[:3], ["AGREED", AGREED["text"], "+1 480 555 0199"])
+        self.assertEqual(lines[:3], ["AGREED sug-1", AGREED["text"], "+1 480 555 0199"])
         self.assertTrue(lines[3].startswith("Calendar times: 2026-10-29T19:00-07:00"), lines)
+        self.assertIn("AGREED sug-1", self.sync()[1])
+        self.delivered("sug-1", "agreed")
         code, out = self.sync()  # the agreed one was shown; the ask comes next
         self.assertEqual(out.strip().splitlines()[0], "ASK sug-2")
 
@@ -238,6 +248,45 @@ class SyncTests(SyncBase):
         self.stub.calls.clear()
         self.sync()  # already told the server
         self.assertEqual(self.stub.calls, [])
+
+    def test_memory_events_and_inferred_help_or_activity_stay_local(self) -> None:
+        self.opt_in()
+        self.stub_sync()
+        self.write_context({"signals": [
+            {"type": "attending", "entity": {"kind": "event", "label": "Cubbie Hackathon"}, "source": "memory"},
+            {"type": "interested_in", "entity": {"kind": "event", "label": "Career Fair"}, "source": "student"},
+            {"type": "can_help_with", "entity": {"kind": "course", "label": "CSE 310"}, "source": "canvas"},
+            {"type": "can_help_with", "entity": {"kind": "topic", "label": "React"}},
+            {"type": "open_to", "entity": {"kind": "activity", "label": "study"}, "source": "canvas"},
+            {"type": "can_help_with", "entity": {"kind": "topic", "label": "recursion"}, "source": "student"},
+        ]})
+        code, out = self.sync()
+        self.assertEqual(code, 0, out)
+        sent = self.put_body()["signals"]
+        self.assertEqual([(s["type"], s["entity"]["label"]) for s in sent], [("can_help_with", "recursion")])
+
+    def test_opt_out_revokes_when_previous_put_was_not_recorded_locally(self) -> None:
+        # An identity can remain after the server saved a PUT whose response was lost.
+        connect_py.load_identity(create=True)
+        self.stub_sync()
+        code, out = self.sync()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.put_body()["policy"]["participating"], False)
+        self.stub.calls.clear()
+        self.sync()
+        self.assertEqual(self.stub.calls, [])
+
+    def test_failed_opt_out_is_retried_without_losing_identity(self) -> None:
+        connect_py.load_identity(create=True)
+        self.stub.responses[("PUT", "/api/context")] = (500, {"error": "unavailable"})
+        code, out = self.sync()
+        self.assert_one_error_line(code, out, "SERVER UNAVAILABLE")
+        self.assertIsNotNone(self.identity())
+        self.stub.calls.clear()
+        self.stub_sync()
+        code, out = self.sync()
+        self.assertEqual(code, 0, out)
+        self.assertFalse(self.put_body()["policy"]["participating"])
 
     def test_bad_context_files(self) -> None:
         self.opt_in()
@@ -329,8 +378,10 @@ class AnswerTests(SyncBase):
         reply = {"status": "agreed", **{k: v for k, v in AGREED.items() if k != "id"}}
         code, out = self.answer("yes", reply)
         self.assertEqual(code, 0, out)
-        self.assertEqual(out.strip().splitlines()[:3], ["AGREED", AGREED["text"], "+1 480 555 0199"])
+        self.assertEqual(out.strip().splitlines()[:3], ["AGREED sug-1", AGREED["text"], "+1 480 555 0199"])
         self.stub_sync(agreed=[AGREED])
+        self.assertIn("AGREED sug-1", self.sync()[1])
+        self.delivered("sug-1", "agreed")
         code, out = self.sync()
         self.assertEqual(out.strip(), "NOTHING NEW")
 
@@ -394,18 +445,16 @@ class SyncSkillMdTests(unittest.TestCase):
     def test_setup_questions_and_check_in_wording(self) -> None:
         sync = self.text.split("## Sync", 1)[1].split("\n## ", 1)[0]
         for line in (
-            "Super Cub notices connections for you. It shares a few facts about your classes and what you're "
-            "working on with the Super Cub network, never your grades, emails or messages, and only suggests a "
-            "connection when both people say yes. Defaults: anyone on Super Cub can be matched with you, public "
-            "events like hackathons count, you're open to study partners, teammates, meals and buddies, I sync "
-            "every 2 hours, and your phone number is shared only after a mutual yes. Say yes, or tell me what to "
-            "change.",
-            "policy --participating yes --discoverable network --share-events yes",
+            "Joining turns on automatic introductions",
+            "connect.py setup --file ~/.config/supercub/context.json --approved-at",
             "supercub: sync. Run the Sync section of the supercub Skill.",
             "connect.py sync --file ~/.config/supercub/context.json",
             "assets/context-example.json",
+            "Never rerun setup to override a no",
+            "unattended scheduled retrieval/sync/relay and a real-to-real introduction remain unverified",
         ):
             self.assertIn(line, sync)
+        self.assertNotIn("--discoverable network --share-events yes", sync)
 
     def test_length_and_plain_texts(self) -> None:
         self.assertLess(len(self.text.splitlines()), 260)

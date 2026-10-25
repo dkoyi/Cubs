@@ -126,17 +126,24 @@ class ConnectPyBase(unittest.TestCase):
     def setUp(self) -> None:
         self.stub = Stub()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.stub))
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
         self.tmp = tempfile.TemporaryDirectory()
-        self.old_env = {k: os.environ.get(k) for k in ("SKILL_DATA_DIR", "CAMPUS_CONNECT_URL", "CAMPUS_CONNECT_NOW")}
+        self.old_env = {k: os.environ.get(k) for k in ("HOME", "SKILL_DATA_DIR", "CAMPUS_CONNECT_URL", "CAMPUS_CONNECT_NOW")}
+        os.environ["HOME"] = self.tmp.name
         os.environ["SKILL_DATA_DIR"] = self.tmp.name
         os.environ["CAMPUS_CONNECT_URL"] = f"http://127.0.0.1:{self.server.server_address[1]}"
         os.environ["CAMPUS_CONNECT_NOW"] = NOW
         self.old_timeout = connect_py.TIMEOUT_SECONDS
+        # Local test traffic must not consult macOS proxy auto-discovery or inherit a
+        # corporate proxy. This also makes timeout/error tests independent of networking.
+        self.old_opener = connect_py.urllib.request._opener
+        connect_py.urllib.request.install_opener(
+            connect_py.urllib.request.build_opener(connect_py.urllib.request.ProxyHandler({})))
 
     def tearDown(self) -> None:
         connect_py.TIMEOUT_SECONDS = self.old_timeout
+        connect_py.urllib.request.install_opener(self.old_opener)
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
@@ -702,7 +709,7 @@ class SkillMdTests(unittest.TestCase):
     def test_privacy_is_stated_plainly(self) -> None:
         shared = self.text.split("## What is shared", 1)[1].split("##", 1)[0]
         for item in ("first name", "what they need", "what they can offer", "free times", "contact",
-                     "only after both say yes", 'Texting "leave campus connect" deletes everything'):
+                     "only after both say yes", 'Texting "leave campus connect" requests deletion'):
             self.assertIn(item, shared)
         consent = self.text.split("6. **Get consent.", 1)[1].split("7. **", 1)[0]
         for item in ("First name", "What you need", "What you can offer", "Your free times",

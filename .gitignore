@@ -7,3 +7,9 @@ __pycache__/
 server/.agents/
 server/.claude/
 server/skills-lock.json
+
+# Local public-profile research is not a synthetic fixture or a publishable participant list.
+research/data/
+
+# Private agent boxes, conversation state and messaging outbox.
+agents/data/

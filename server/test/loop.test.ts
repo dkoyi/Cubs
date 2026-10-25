@@ -380,6 +380,68 @@ describe("discovery rules", () => {
   });
 });
 
+describe("permission revocation", () => {
+  it("a named new student without an opt-in cannot publish context", async () => {
+    const s = newStudent();
+    const res = await body<ContextBody>(await handlePutContext(put(s, { policy: { first_name: "Sam" }, signals: classSignals }), deps));
+    expect(res.accepted).toBe(0);
+    expect(res.signals_total).toBe(0);
+    expect(res.rejected.every((r) => r.reason === "participating is off")).toBe(true);
+    expect(await store.smembers("participants")).not.toContain(s.id);
+  });
+
+  it("section scope cannot connect identical course/section codes at different schools", async () => {
+    const a = newStudent();
+    const b = newStudent();
+    await handlePutContext(put(a, { ...alexCtx, policy: { ...alexCtx.policy, discoverable: "section" } }), deps);
+    const res = await body<ContextBody>(await handlePutContext(put(b, { ...jordanCtx, policy: { ...jordanCtx.policy, discoverable: "section", school: "UCLA" } }), deps));
+    expect(res.open_suggestion).toBe(false);
+  });
+
+  it("turning events off purges remembered events and closes an already accepted ask", async () => {
+    const { alex, jordan, id } = await pair();
+    const event = { type: "attending", entity: { kind: "event", label: "Cubbie Hackathon" }, source: "memory" };
+    await handlePutContext(put(alex, { policy: { share_events: true }, signals: [event] }), deps);
+    await handleAnswer(answer(alex, id, "yes"), deps);
+    await handlePutContext(put(alex, { policy: { share_events: false } }), deps);
+    expect(await getSuggestion(store, id)).toMatchObject({ status: "passed", release_a: null, release_b: null });
+    const ctx = JSON.parse((await store.get(`ctx:${alex.id}`)) ?? "{}");
+    expect(ctx.signals.some((s: { type: string }) => s.type === "attending")).toBe(false);
+    expect(await body<AnswerBody>(await handleAnswer(answer(jordan, id, "yes"), deps))).toEqual({ status: "passed" });
+  });
+
+  it("narrowing scope closes an existing suggestion before the other yes", async () => {
+    const { alex, jordan, id } = await pair();
+    await handleAnswer(answer(alex, id, "yes"), deps);
+    await handlePutContext(put(alex, { policy: { discoverable: "section" } }), deps);
+    expect(await body<AnswerBody>(await handleAnswer(answer(jordan, id, "yes"), deps))).toEqual({ status: "passed" });
+  });
+
+  it("snapshot sync withdraws old offers/preferences even when replaced by other signals", async () => {
+    const { alex, id } = await pair();
+    const offer = { type: "can_help_with", entity: { kind: "topic", label: "recursion" }, source: "student" };
+    await handlePutContext(put(alex, { signals: [offer] }), deps);
+    // Same-sized replacement must still detect removal, not just a lower signal count.
+    const replacement = { type: "interested_in", entity: { kind: "topic", label: "robotics" }, source: "student" };
+    const res = await body<ContextBody>(await handlePutContext(put(alex, { signals: [classSignals[0], classSignals[1], replacement, { ...replacement, entity: { kind: "topic", label: "music" } }], replace_signals: true }), deps));
+    expect(res.signals_total).toBe(4);
+    const raw = (await store.get(`ctx:${alex.id}`)) ?? "";
+    expect(raw).not.toContain("can_help_with");
+    expect(raw).not.toContain("open_to");
+    expect((await getSuggestion(store, id))?.status).toBe("passed");
+    expect((await handlePutContext(put(alex, { replace_signals: "yes" }), deps)).status).toBe(400);
+  });
+
+  it("the fresh weekly cap is one suggestion unless explicitly configured", async () => {
+    const { alex, id } = await pair();
+    await handleAnswer(answer(alex, id, "no"), deps);
+    const third = newStudent();
+    const res = await body<ContextBody>(await handlePutContext(put(third, context("Taylor", "taylor@example.edu", [])), deps));
+    // Jordan and Alex each used their weekly cap, so Taylor cannot get a new ask with either.
+    expect(res.open_suggestion).toBe(false);
+  });
+});
+
 describe("PUT /api/context validation", () => {
   it("rejects signals on the never-accepted list with a reason and stores the rest", async () => {
     const s = newStudent();
@@ -396,7 +458,7 @@ describe("PUT /api/context validation", () => {
       { type: "working_on", entity: { kind: "assignment", label: "HW1" }, due: "2026-10-01T23:59:00-07:00", source: "canvas" },
     ];
     const res = await body<ContextBody>(
-      await handlePutContext(put(s, { policy: { first_name: "Sam" }, signals }), deps),
+      await handlePutContext(put(s, { policy: { participating: true, first_name: "Sam" }, signals }), deps),
     );
     expect(res.accepted).toBe(1);
     expect(res.signals_total).toBe(1);
@@ -409,7 +471,7 @@ describe("PUT /api/context validation", () => {
 
     const raw = (await store.get(`ctx:${s.id}`)) ?? "";
     expect(raw).not.toContain("a@b.edu");
-    expect(raw).not.toContain("555");
+    expect(raw).not.toContain("480-555-0101");
     expect(raw).toContain('"detail":"ping me at or"');
   });
 
@@ -420,7 +482,7 @@ describe("PUT /api/context validation", () => {
       { type: "attending", entity: { kind: "event", label: "Fall Career Fair" }, source: "calendar", when: "2026-10-27T10:00:00-07:00" },
     ];
     const res = await body<ContextBody>(
-      await handlePutContext(put(s, { policy: { first_name: "Sam", share_events: true }, signals }), deps),
+      await handlePutContext(put(s, { policy: { participating: true, first_name: "Sam", share_events: true }, signals }), deps),
     );
     expect(res.accepted).toBe(1);
     expect(res.rejected).toEqual([{ index: 0, reason: "event does not look like a public event" }]);
@@ -428,14 +490,14 @@ describe("PUT /api/context validation", () => {
 
   it("requires a first name, caps signals per call, and validates free and tz", async () => {
     const s = newStudent();
-    expect((await handlePutContext(put(s, { signals: [] }), deps)).status).toBe(400);
+    expect((await handlePutContext(put(s, { policy: { participating: true }, signals: [] }), deps)).status).toBe(400);
     const tooMany = Array.from({ length: 61 }, () => classSignals[2]);
-    expect((await handlePutContext(put(s, { policy: { first_name: "Sam" }, signals: tooMany }), deps)).status).toBe(400);
-    expect((await handlePutContext(put(s, { policy: { first_name: "Sam" }, tz: "Mars/Olympus" }), deps)).status).toBe(400);
+    expect((await handlePutContext(put(s, { policy: { participating: true, first_name: "Sam" }, signals: tooMany }), deps)).status).toBe(400);
+    expect((await handlePutContext(put(s, { policy: { participating: true, first_name: "Sam" }, tz: "Mars/Olympus" }), deps)).status).toBe(400);
     expect(
-      (await handlePutContext(put(s, { policy: { first_name: "Sam" }, free: [{ start: "tomorrow", end: "later" }] }), deps)).status,
+      (await handlePutContext(put(s, { policy: { participating: true, first_name: "Sam" }, free: [{ start: "tomorrow", end: "later" }] }), deps)).status,
     ).toBe(400);
-    expect((await handlePutContext(put(s, { policy: { first_name: "Sam", contact: "not a contact" } }), deps)).status).toBe(400);
+    expect((await handlePutContext(put(s, { policy: { participating: true, first_name: "Sam", contact: "not a contact" } }), deps)).status).toBe(400);
   });
 
   it("re-sending a signal refreshes it, and expired signals drop on the next sync", async () => {
@@ -443,7 +505,7 @@ describe("PUT /api/context validation", () => {
     await handlePutContext(put(s, alexCtx), deps);
     // HW4 is due Oct 28 23:59 -07:00, so it expires a day later.
     nowMs = Date.parse("2026-10-30T08:00:00.000Z");
-    const res = await body<ContextBody>(await handlePutContext(put(s, { signals: [] }), deps));
+    const res = await body<ContextBody>(await handlePutContext(put(s, { policy: { participating: true }, signals: [] }), deps));
     expect(res.signals_total).toBe(2);
   });
 
@@ -542,12 +604,12 @@ describe("model judge (mocked)", () => {
   });
 });
 
-describe("undated memory signals (real cases from Oct 24 phones)", () => {
+describe("undated memory signals (synthetic adaptations with explicit activity approval)", () => {
   const memory = (type: string, kind: string, label: string) => ({ type, entity: { kind, label }, source: "memory" });
   const enrolled = (label: string) => ({ type: "enrolled_in", entity: { kind: "course", label }, source: "canvas" });
   const student = (firstName: string, signals: Array<Record<string, unknown>>) => ({
     policy: { participating: true, discoverable: "school", school: "ASU", first_name: firstName, share_events: true },
-    signals,
+    signals: [...signals, memory("open_to", "activity", "study")],
     tz: "America/Phoenix",
   });
   const studentA = student("Ana", [
@@ -587,17 +649,17 @@ describe("undated memory signals (real cases from Oct 24 phones)", () => {
     expect((await body<ContextBody>(await handlePutContext(put(b, studentB), deps))).open_suggestion).toBe(true);
     expect(judge.calls).toHaveLength(1);
     const req = judge.calls[0];
-    expect(req?.shared).toEqual(["working_on:ai project"]);
-    expect(req?.prefilter).toBe(0.5);
-    expect(req?.a).toEqual([{ type: "working_on", kind: "topic", label: "AI project" }]);
-    expect(req?.b).toEqual([{ type: "working_on", kind: "topic", label: "AI project" }]);
+    expect(req?.shared).toEqual(["open_to:study", "working_on:ai project"]);
+    expect(req?.prefilter).toBe(0.65);
+    expect(req?.a).toContainEqual({ type: "working_on", kind: "topic", label: "AI project" });
+    expect(req?.b).toContainEqual({ type: "working_on", kind: "topic", label: "AI project" });
     const view = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(a), deps));
     expect(view.ask?.text).toBe(text);
     expect((await getSuggestion(store, view.ask?.id ?? ""))?.texts_from).toBe("model");
   });
 
   it("B is enrolled in CSE 240 and C works on CSE 240 Project 1: the suggestion names the course", async () => {
-    const textB = "Someone in your CSE 240 class is on Super Cub too. Want me to see if you'd both like to connect?";
+    const textB = "Someone working on something for CSE 240 is on Super Cub too. Want me to see if you'd both like to connect?";
     const textC = "Someone taking CSE 240 is on Super Cub too. Want me to see if you'd both like to connect?";
     const judge = mockJudge((req) => ({
       worth: 0.7,
@@ -612,11 +674,11 @@ describe("undated memory signals (real cases from Oct 24 phones)", () => {
     expect((await body<ContextBody>(await handlePutContext(put(c, studentC), deps))).open_suggestion).toBe(true);
     expect(judge.calls).toHaveLength(1);
     const req = judge.calls[0];
-    expect(req?.shared).toEqual(["enrolled_in:cse240"]);
-    expect(req?.prefilter).toBe(0.6);
+    expect(req?.shared).toEqual(["enrolled_in:cse240", "open_to:study"]);
+    expect(req?.prefilter).toBe(0.75);
     // C discovered B: C is side a. Both sides see the course, never the assignment title or other courses.
-    expect(req?.a).toEqual([{ type: "working_on", kind: "course", label: "CSE 240" }]);
-    expect(req?.b).toEqual([{ type: "enrolled_in", kind: "course", label: "CSE 240" }]);
+    expect(req?.a).toContainEqual({ type: "working_on", kind: "course", label: "CSE 240" });
+    expect(req?.b).toContainEqual({ type: "enrolled_in", kind: "course", label: "CSE 240" });
     expect(JSON.stringify(req)).not.toContain("Project 1");
     expect(JSON.stringify(req)).not.toContain("CSE 230");
 
@@ -627,7 +689,7 @@ describe("undated memory signals (real cases from Oct 24 phones)", () => {
     const stored = await getSuggestion(store, viewB.ask?.id ?? "");
     expect(stored?.texts_from).toBe("model");
     expect(stored?.kind).toBe("study");
-    expect(stored?.shared).toEqual(["enrolled_in:cse240"]);
+    expect(stored?.shared).toEqual(["enrolled_in:cse240", "open_to:study"]);
   });
 
   it("B and C without the judge get rules text naming CSE 240", async () => {
@@ -637,8 +699,8 @@ describe("undated memory signals (real cases from Oct 24 phones)", () => {
     expect((await body<ContextBody>(await handlePutContext(put(c, studentC), deps))).open_suggestion).toBe(true);
     const viewB = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(b), deps));
     const viewC = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(c), deps));
-    expect(viewB.ask?.text).toBe("Someone in your CSE 240 class is on Super Cub too. Want me to see if you'd both like to connect?");
-    expect(viewC.ask?.text).toBe("Someone taking CSE 240 is on Super Cub too. Want me to see if you'd both like to connect?");
+    expect(viewB.ask?.text).toBe("Someone working on something for CSE 240 is open to studying with classmates. Want me to see if you'd both like to connect?");
+    expect(viewC.ask?.text).toBe("Someone taking CSE 240 is open to studying with classmates. Want me to see if you'd both like to connect?");
   });
 
   it("the guard rejects model text naming the assignment title instead of the course", async () => {

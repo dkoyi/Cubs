@@ -16,7 +16,7 @@ import {
 import type { Policy, Signal } from "../src/signals.js";
 
 const NOW = new Date("2026-10-24T16:00:00.000Z");
-const policy: Policy = { ...DEFAULT_POLICY, first_name: "Alex", school: "ASU", share_events: true };
+const policy: Policy = { ...DEFAULT_POLICY, participating: true, first_name: "Alex", school: "ASU", share_events: true };
 
 function sig(raw: Record<string, unknown>): Signal {
   const parsed = parseSignal(raw, policy, NOW);
@@ -92,6 +92,37 @@ describe("policy", () => {
   });
 });
 
+describe("restrictive sharing", () => {
+  it("requires explicit participation and keeps fresh defaults narrow", () => {
+    const parsed = parsePolicy(undefined, null);
+    expect(parsed.ok && parsed.value).toMatchObject({ participating: false, discoverable: "school", intro: "ask", share_events: false, share_applications: false });
+    expect(parsePolicy({ participating: true }, null).ok).toBe(false);
+    expect(parsePolicy({ participating: true, first_name: "Alex" }, null).ok).toBe(true);
+  });
+
+  it("event and company permissions apply regardless of source or signal type", () => {
+    const narrow = { ...policy, share_events: false, share_applications: false };
+    for (const source of ["canvas", "calendar", "email", "memory", "student"]) {
+      for (const type of ["attending", "working_on", "interested_in"]) {
+        const result = parseSignal({ type, entity: { kind: "event", label: "Cubbie Hackathon" }, source }, narrow, NOW);
+        expect(result).toEqual({ ok: false, error: "share_events is off" });
+      }
+      expect(parseSignal({ type: "interested_in", entity: { kind: "company", label: "Acme" }, source }, narrow, NOW)).toEqual({ ok: false, error: "share_applications is off" });
+    }
+  });
+
+  it("accepts offers and activity approval only from student or memory sources", () => {
+    for (const [type, kind, label] of [["can_help_with", "topic", "recursion"], ["open_to", "activity", "study"]]) {
+      for (const source of ["canvas", "calendar", "email", undefined]) {
+        expect(parseSignal({ type, entity: { kind, label }, source }, policy, NOW).ok).toBe(false);
+      }
+      for (const source of ["student", "memory"]) {
+        expect(parseSignal({ type, entity: { kind, label }, source }, policy, NOW).ok).toBe(true);
+      }
+    }
+  });
+});
+
 describe("prefilter score", () => {
   const freeA = [{ start: "2026-10-25T18:00:00.000Z", end: "2026-10-25T21:00:00.000Z" }];
   const freeB = [{ start: "2026-10-25T19:00:00.000Z", end: "2026-10-25T22:00:00.000Z" }];
@@ -111,7 +142,7 @@ describe("prefilter score", () => {
     const fair = sig({ type: "attending", entity: { kind: "event", label: "Career Fair" }, when: "2026-10-30T10:00:00Z", source: "student" });
     const helps = sig({ type: "can_help_with", entity: { kind: "topic", label: "recursion" }, source: "memory" });
     const needs = sig({ type: "working_on", entity: { kind: "topic", label: "Recursion" }, source: "memory" });
-    expect(prefilterScore(ctx("a", "A", [fair, helps]), ctx("b", "B", [fair, needs]), NOW)).toBe(0.7);
+    expect(prefilterScore(ctx("a", "A", [fair, helps]), ctx("b", "B", [fair, needs]), NOW)).toBe(1);
   });
 
   it("scores undated memory signals: working_on alone reaches the cutoff, events and interests add up", () => {

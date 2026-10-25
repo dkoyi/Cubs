@@ -1,7 +1,7 @@
 // Typed data access and the matching workflow on top of the Store.
 //
 // Keys:
-//   auth:{sid}               SHA-256 of the student's token (trust on first use, 30-day expiry)
+//   auth:{sid}               SHA-256 of the person's token (retained until leave)
 //   req:{sid}:{pool}         the student's request in a pool (JSON)
 //   pools:{sid}              set of pool keys the student has requests in
 //   pool:{pool}              set of student ids with a request in that pool
@@ -84,12 +84,6 @@ const DAY_SECONDS = 24 * 3600;
 const INDEX_TTL_SECONDS = 7 * DAY_SECONDS;
 /** Requests stay readable for a day after they expire so the student can be told. */
 const EXPIRED_GRACE_SECONDS = DAY_SECONDS;
-/**
- * The token hash is kept 30 days from first use, longer than any other record, so unused ids
- * do not pile up. If it lapses, the next call from the same device claims the id again;
- * student ids are never shown to other students.
- */
-const AUTH_TTL_SECONDS = 30 * DAY_SECONDS;
 
 const k = {
   auth: (sid: string) => `auth:${sid}`,
@@ -115,12 +109,15 @@ function sha256(value: string): string {
 /** Trust on first use: the first token seen for a student id is the only one accepted after. */
 export async function authorize(store: Store, sid: string, token: string): Promise<boolean> {
   const hash = sha256(token);
-  if (await store.setIfAbsent(k.auth(sid), hash, AUTH_TTL_SECONDS)) return true;
+  if (await store.setIfAbsent(k.auth(sid), hash)) return true;
   const stored = await store.get(k.auth(sid));
-  if (stored === null) return store.setIfAbsent(k.auth(sid), hash, AUTH_TTL_SECONDS);
+  if (stored === null) return store.setIfAbsent(k.auth(sid), hash);
   const a = Buffer.from(stored, "hex");
   const b = Buffer.from(hash, "hex");
-  return a.length === b.length && timingSafeEqual(a, b);
+  const valid = a.length === b.length && timingSafeEqual(a, b);
+  // Upgrade a valid existing binding without rotating its UUID or token.
+  if (valid) await store.set(k.auth(sid), stored);
+  return valid;
 }
 
 // ---------- records ----------

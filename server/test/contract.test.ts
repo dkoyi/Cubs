@@ -11,6 +11,10 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   handleAnswer,
+  handleCapabilities,
+  handleDelivered,
+  handleGetContext,
+  handleConnections,
   handleJoin,
   handleLeave,
   handleMatches,
@@ -29,17 +33,22 @@ const store = new InMemoryStore(() => NOW);
 const deps: Deps = { store, now: () => new Date(NOW) };
 
 const routes: Record<string, (request: Request, deps: Deps) => Promise<Response>> = {
+  "GET /api/capabilities": handleCapabilities,
   "POST /api/requests": handleJoin,
   "GET /api/matches": handleMatches,
   "POST /api/respond": handleRespond,
   "DELETE /api/me": handleLeave,
   "PUT /api/context": handlePutContext,
   "GET /api/suggestions": handleSuggestions,
+  "GET /api/context": handleGetContext,
+  "GET /api/connections": handleConnections,
+  "POST /api/connections": handleConnections,
 };
 
 /** Routes with a path parameter, matched after the exact routes. */
 const patternRoutes: Array<[string, RegExp, (request: Request, deps: Deps) => Promise<Response>]> = [
   ["POST", /^\/api\/suggestions\/[^/]+\/answer$/, handleAnswer],
+  ["POST", /^\/api\/suggestions\/[^/]+\/delivered$/, handleDelivered],
 ];
 
 async function bridge(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -91,6 +100,9 @@ function student(): (...args: string[]) => Promise<{ code: number; out: string }
           env: {
             ...process.env,
             SKILL_DATA_DIR: dataDir,
+            HOME: dataDir,
+            NO_PROXY: "127.0.0.1,localhost",
+            no_proxy: "127.0.0.1,localhost",
             CAMPUS_CONNECT_URL: baseUrl,
             CAMPUS_CONNECT_NOW: new Date(NOW).toISOString(),
             PYTHONDONTWRITEBYTECODE: "1",
@@ -138,7 +150,7 @@ describe("Python client against the real handlers", () => {
     expect(r.out).toContain("Name: Jordan");
     expect(r.out).toContain("Why: You're both free Sat Oct 24, 12 to 2 pm. Jordan can help with hash.");
     expect(r.out).toContain("Sat Oct 24, 12:00 PM to 1:00 PM");
-    expect(r.out).not.toContain("555");
+    expect(r.out).not.toContain("+1 480 555 0199");
     const id = /Match id: (\S+)/.exec(r.out)?.[1] ?? "";
     expect(id).not.toBe("");
 
@@ -189,6 +201,89 @@ function contextFile(firstName: string, contact: string): string {
 }
 
 describe("Python client sync loop against the real handlers", () => {
+  it("runs the approved one-time setup for two people and shares contacts without answer commands", async () => {
+    const eli = student(), faye = student();
+    const approveFile = (name: string) => {
+      const file = contextFile(name, `${name.toLowerCase()}@example.test`);
+      const ctx = JSON.parse(readFileSync(file, "utf8")) as { policy: Record<string, unknown> };
+      ctx.policy = { ...ctx.policy, participating: true, intro: "automatic", share_intro_profile: true,
+        intro_profile: { name: `${name} Example`, headline: "Example builder", links: [] } };
+      writeFileSync(file, JSON.stringify(ctx));
+      return file;
+    };
+    const eliFile = approveFile("Eli"), fayeFile = approveFile("Faye");
+    const first = await eli("setup", "--file", eliFile, "--approved-at", new Date(NOW).toISOString());
+    expect(first.code).toBe(0);
+    expect(first.out).toContain("SETUP COMPLETE");
+    expect(first.out).toContain("NOTHING NEW");
+    const second = await faye("setup", "--file", fayeFile, "--approved-at", new Date(NOW).toISOString());
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("AGREED");
+    expect(second.out).toContain("eli@example.test");
+    expect(second.out).not.toContain("said yes too");
+    const next = await eli("sync", "--file", eliFile);
+    expect(next.out).toContain("faye@example.test");
+    expect(next.out).toContain("Profile: Faye Example");
+    expect((await eli("context")).out).toContain("Setup release");
+  }, 30_000);
+
+  it("carries an alumni identity to a new device, connects complementary goals, records feedback and revokes retention", async () => {
+    const alex = student(), jordan = student(), restored = student();
+    for (const client of [alex, jordan]) {
+      const r = await client("policy", "--participating", "yes", "--alumni-network", "yes", "--remember-connections", "yes",
+        "--life-stage", "alumni", "--affiliation", "ASU", "--discoverable", "alumni", "--share-profile", "yes");
+      expect(r.code).toBe(0);
+    }
+    const directory = mkdtempSync(join(tmpdir(), "supercub-alumni-"));
+    dirs.push(directory);
+    const makeFile = (name: string, type: string, label: string) => {
+      const path = join(directory, `${name}.json`);
+      writeFileSync(path, JSON.stringify({ policy: { first_name: name, school: "", contact: `${name.toLowerCase()}@example.edu`,
+        intro_profile: { name: `${name} Example`, headline: "Healthcare product builder",
+          links: [{ kind: "linkedin", url: `https://www.linkedin.com/in/${name.toLowerCase()}-example` }] } },
+        signals: [
+          { type, entity: { kind: "topic", label }, source: "student", confirmed_at: new Date(NOW).toISOString(), topics: ["healthcare"] },
+          { type: "open_to", entity: { kind: "activity", label: "advising" }, source: "student", confirmed_at: new Date(NOW).toISOString() },
+        ], free: [] }));
+      return path;
+    };
+    expect((await alex("sync", "--file", makeFile("Alex", "looking_for", "healthcare product advice"))).code).toBe(0);
+    const backup = join(directory, "private-backup.json");
+    expect((await alex("identity", "export", "--file", backup)).code).toBe(0);
+    const identity = (JSON.parse(readFileSync(backup, "utf8")) as { identity: { student_id: string; token: string } }).identity;
+    const restore = await restored("identity", "import", "--file", backup);
+    expect(restore.code).toBe(0);
+    expect(restore.out).toContain("IDENTITY RESTORED");
+    expect(restore.out).not.toContain(identity.token);
+    expect((await restored("context")).out).toContain("Life stage: alumni");
+
+    const proposed = await jordan("sync", "--file", makeFile("Jordan", "can_help_with", "clinical workflow advice"));
+    expect(proposed.code).toBe(0);
+    const id = /^ASK (\S+)/.exec(proposed.out)?.[1] ?? "";
+    expect(id).not.toBe("");
+    const intro = await restored("sync");
+    expect(intro.out).toContain(`ASK ${id}`);
+    expect(intro.out).toContain("Profile: Jordan Example");
+    expect(intro.out).not.toContain("jordan@example.edu");
+    const detail = await restored("preview", id);
+    expect(detail.code).toBe(0);
+    expect(detail.out).toContain("LinkedIn: https://www.linkedin.com/in/jordan-example");
+    expect((await restored("delivered", id, "ask")).code).toBe(0);
+    expect((await restored("answer", id, "yes")).out.trim()).toBe("WAITING");
+    expect((await jordan("answer", id, "yes")).out).toContain("alex@example.edu");
+    expect((await restored("sync")).out).toContain("jordan@example.edu");
+    expect((await restored("delivered", id, "agreed")).code).toBe(0);
+    expect((await restored("connections")).out).toContain(`Connection id: ${id}`);
+    expect((await restored("feedback", id, "useful")).code).toBe(0);
+    expect((await restored("connections")).out).toContain("Useful: True");
+    expect((await restored("policy", "--alumni-network", "no")).code).toBe(0);
+    expect((await restored("sync")).code).toBe(0);
+    expect(await store.get(`profile:${identity.student_id}`)).toBeNull();
+    expect((await jordan("connections")).out).toContain("No retained connections");
+    expect((await restored("leave")).code).toBe(0);
+    expect(await store.get(`auth:${identity.student_id}`)).toBeNull();
+  }, 60_000);
+
   it("both students sync, get one ask each, both say yes, and both get the other's contact once", async () => {
     const alex = student();
     const jordan = student();
@@ -221,7 +316,8 @@ describe("Python client sync loop against the real handlers", () => {
     r = await alex("sync", "--file", alexFile);
     expect(r.out.trim().split("\n")[0]).toBe(`ASK ${id}`);
     expect(r.out).not.toContain("Jordan");
-    expect(r.out).not.toContain("555");
+    // UUIDs can contain "555" by chance; assert the actual private phone is absent.
+    expect(r.out).not.toContain("+1 480 555 0199");
 
     r = await alex("answer", id, "yes");
     expect(r.code).toBe(0);
@@ -230,18 +326,22 @@ describe("Python client sync loop against the real handlers", () => {
     r = await jordan("answer", id, "yes");
     expect(r.code).toBe(0);
     let lines = r.out.trim().split("\n");
-    expect(lines[0]).toBe("AGREED");
+    expect(lines[0]).toBe(`AGREED ${id}`);
     expect(lines[1]).toContain("You're on. Alex said yes too.");
     expect(lines[2]).toBe("alex@example.edu");
     expect(lines[3]).toBe("Calendar times: 2026-10-25T14:00-07:00 to 2026-10-25T15:00-07:00");
+    expect((await jordan("delivered", id, "agreed")).code).toBe(0);
 
     // Alex hears it on the next sync, once.
     r = await alex("sync", "--file", alexFile);
     lines = r.out.trim().split("\n");
-    expect(lines[0]).toBe("AGREED");
+    expect(lines[0]).toBe(`AGREED ${id}`);
     expect(lines[1]).toContain("You're on. Jordan said yes too.");
     expect(lines[2]).toBe("+1 480 555 0199");
     expect(lines[3]).toBe("Calendar times: 2026-10-25T14:00-07:00 to 2026-10-25T15:00-07:00");
+    // Fetching is not delivery: an interrupted relay is offered again until acknowledged.
+    expect((await alex("sync", "--file", alexFile)).out).toContain(`AGREED ${id}`);
+    expect((await alex("delivered", id, "agreed")).code).toBe(0);
     expect((await alex("sync", "--file", alexFile)).out.trim()).toBe("NOTHING NEW");
 
     // Jordan already heard it from the answer, so the next sync has nothing new.

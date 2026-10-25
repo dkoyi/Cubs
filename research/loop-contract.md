@@ -1,128 +1,100 @@
-# Super Cub loop contract (v1, 2026-10-24)
+# Super Cub loop contract (current local implementation, 2026-10-24)
 
-The one loop we are proving: extract context → preserve it → discover relationships → proactively nudge → coordinate an outcome. Two builders work from this file: one on `server/`, one on `supercub/` + `tests/`. Neither edits the other's folder. This file is the only shared truth; if it is wrong, change it here first.
+Root `CLAUDE.md` is product authority. This file documents the implemented protocol and its limits; it is not a claim that production or Cubbie's scheduler has been retested. Preserve the legacy request/match API alongside contextual discovery.
 
-## Verified platform boundaries that shape this
+## Platform and transport
 
-- A Skill runs only when the student texts something that triggers it or when a scheduled check-in it created fires. Nothing can push into Cubbie.
-- During a run, Cubbie (not the script) reads Canvas, Calendar, email events and its own memory, then hands results to the script as arguments or a file. Scripts cannot call Cubbie abilities.
-- Scripts can make outbound HTTPS to any host and keep files under HOME.
-- Cubbie cannot message another student or another Cubbie. The server is the only meeting point.
-- Conversations the student has with Cubbie outside our Skill are not observable. The legitimate bridge is Cubbie's own memory: at sync time Cubbie lists what it remembers the student is working on, interested in, can help with, attending and (if allowed) applying to.
+Cubbie is closed-source and external. It retrieves available Canvas/calendar/email event context and memory during supported interactions/check-ins; the script cannot call those abilities or automatically read entire chat histories. No native push into Cubbie is demonstrated. The client posts permitted context and pulls suggestions over HTTPS.
 
-## Identity and auth (unchanged, reuse)
+All person endpoints retain the compatible `X-Student-Id: <uuid>` and `Authorization: Bearer <token>` headers. The Python client also sends legacy `X-Student-Token`, but the server authenticates Bearer. New token bindings persist until leave; a valid existing binding is upgraded without rotating its UUID/token. This supports alumni continuity and is not verified school identity. Private-file identity import verifies the token and recovers the current remote profile before saving local state.
 
-Headers `X-Student-Id` (uuid) and `X-Student-Token` as today. Trust on first use, token bound to id. All new endpoints require them. `DELETE /api/me` must now also wipe context, suggestions and answers for the student.
-
-## Signal schema
+## Signals and permissions
 
 ```json
 {
-  "type": "enrolled_in | working_on | attending | interested_in | can_help_with | applying_to | open_to",
-  "entity": { "kind": "course | assignment | event | topic | company | activity", "key": "<server normalizes; client sends label>", "label": "CSE 310" },
-  "detail": "optional short free text, max 120 chars, e.g. 'HW4 hash tables' or 'section 12345, Prof. Ortiz'",
-  "when": "optional ISO start for events",
-  "due": "optional ISO due date for assignments",
-  "source": "canvas | calendar | email | memory | student",
-  "observed_at": "ISO"
+  "type": "working_on",
+  "entity": {"kind": "assignment", "label": "CSE 310 HW4"},
+  "detail": "hash tables",
+  "due": "2026-10-28T23:59:00-07:00",
+  "source": "canvas",
+  "observed_at": "2026-10-24T08:00:00-07:00"
 }
 ```
 
-`open_to` entities are activities: `study`, `teammates`, `rides`, `mentoring`, `meals`, `buddies`.
+Types: `enrolled_in`, `working_on`, `attending`, `interested_in`, `can_help_with`, `applying_to`, `open_to`, `looking_for`, `experienced_in`. Kinds: `course`, `assignment`, `event`, `topic`, `company`, `activity`. Sources: `canvas`, `calendar`, `email`, `memory`, `student`. Optional `when` is the event start. Labels/details are at most 120 characters server-side (the client further limits labels). The server derives entity keys from labels: lowercase, punctuation stripped, whitespace collapsed; course keys also remove spaces.
 
-Never accepted by the server (reject with reason, never store): grades, scores, email bodies or subjects, calendar titles that are not public-looking events, names of other people, locations finer than campus, free text over 120 chars. The server strips anything that looks like an email address or phone number from `detail`.
+Never intentionally collect transcripts, message/email prose or subjects, private calendar titles, grades, files, third-party names or fine locations. Validation blocks common grade/contact/location patterns, URLs and overlong text, and strips contact-like text from details. It cannot comprehensively detect names, private prose, truth or consent; Cubbie must review approved facts before sending.
 
-Freshness: `working_on` expires at `due` + 1 day or 21 days; `attending` at `when` + 1 day or 30 days; `interested_in`, `can_help_with`, `open_to` 60 days, refreshed on each sync; `enrolled_in` 120 days; `applying_to` 45 days. Re-sending the same (type, entity.key) refreshes `observed_at`.
+- `attending` and **any event-kind entity** need `share_events`, including memory/student sources. Calendar/email events must also look public; email supports attending only.
+- `applying_to` and any company-kind entity need `share_applications`. The current client keeps applications off and exposes no CLI flag to enable them.
+- `can_help_with` requires an explicit offer to help others; `open_to` requires explicit activity approval. Both require `memory` or `student` provenance in client/server validation. Declaring that source is not proof of consent; Cubbie must check it. Finished coursework is never an offer.
+- `open_to` labels: `study`, `teammates`, `rides`, `mentoring`, `meals`, `buddies`, `advising`, `collaboration`. Both people must share an approved activity; there is no inferred-kind fallback.
+- `looking_for` is an explicit current request; `experienced_in` is separately approved background, never willingness. Both require memory/student provenance. Subject-bearing signals may contain up to five approved `topics`, each at most 60 characters. These get the same heuristic text checks and cannot carry private prose.
+- `confirmed_at` records actual approval time for requests, offers and activities. It is required on these signals in alumni mode, cannot be more than five minutes in the future, and controls expiry even when they are synced again. Missing timestamps remain compatible for older non-alumni clients; new Skill instructions always preserve confirmation time.
+- Course detail is section only, never instructor. Free windows contain start/end only, not calendar titles.
 
-Entity key normalization on the server: lowercase, collapse spaces, strip punctuation; course codes also strip spaces ("CSE 310" and "cse310" are one key); events keep words; topics singularize nothing, just lowercase.
+Expiry: `working_on`: due +1 day or 21 days; `attending`: when +1 day or 30 days; interests/offers/activities: 60 days; courses: 120 days; applications: 45 days; requests: 30 days; experience: 365 days, subject to the 120-day inactive context-record lifetime. Requests/offers/activities use `confirmed_at` when supplied; others use sync time. Only the minimal opted-in profile survives context expiry, with no signals or free windows. Refresh only facts Cubbie can still substantiate.
 
-## Policy (per student, stored with context)
+## Policy
+
+Fresh defaults on client and server: participating **false**, discoverable **school**, intro **ask**, events/applications **false**, cap **one/week**. The server cap can be explicitly configured with `SUPERCUB_MAX_PER_WEEK` (0–7); stored explicit choices persist. A new record without a participation flag must not join discovery. An explicit opt-in requires first name; the Skill also confirms school, contact and activity choices.
+
+Additional defaults: `life_stage: "student"`, `alumni_network: false`, `remember_connections: false`, `affiliations: []`. Affiliations are up to five approved school labels, not verified credentials. Alumni opt-in persists the minimal policy/name/contact/affiliation/time-zone profile until withdrawn or leave; it never turns participation on. Relationship retention requires its own consent from both people.
+
+Profile-led introductions use `share_intro_profile: true` only after the person approves the displayed profile once. The storage default is false, including existing participants. `policy.intro_profile` is a replacement object with required `name` (60 chars), optional `headline` (100), `about` (240), `photo_url`, and up to three `links: [{kind:"linkedin"|"github"|"website",url}]`. URLs are public HTTPS, max 400 characters, without credentials, query strings or fragments; LinkedIn links must be profile URLs. Unsupported fields are stripped; private contact text is rejected heuristically. This profile may reveal approved information beyond shared subjects. Disabling sharing removes it and closes open introductions; changing the profile also invalidates affected open asks. Alumni retention includes this approved profile while both retention and profile-sharing permissions remain on.
 
 ```json
-{
-  "participating": true,
-  "discoverable": "section | school | network",
-  "intro": "ask | auto_study",
-  "share_events": false,
-  "share_applications": false,
-  "max_suggestions_per_week": 1,
-  "school": "ASU",
-  "first_name": "Apoorv",
-  "contact": "optional; same tiers as today, released only after both yes"
-}
+{"participating": true, "discoverable": "school", "intro": "ask",
+ "share_events": false, "share_applications": false, "max_suggestions_per_week": 1,
+ "school": "ASU", "first_name": "Alex", "contact": "alex@example.edu"}
 ```
 
-Defaults: participating true once the student said yes in chat, discoverable `school`, intro `ask`, share_events false, share_applications false, one suggestion a week.
+`section` requires the same school and course/section detail. `school` requires the same normalized school, or a shared approved affiliation when both enabled alumni participation. New `alumni` scope requires alumni participation on both sides and a shared school/affiliation. When either person is an alumnus, both must enable alumni participation regardless of scope. `network` is explicit wider scope. Turning alumni permission off resets alumni scope to school and disables retained history. `auto_study` remains legacy metadata with no automatic acceptance behavior.
 
-## Endpoints (new) — Builder A
+New `intro: "automatic"` requires `automatic_intro_consent`: actual ISO `approved_at`, chosen `contact`, `discoverable`, `school`, `affiliations`, `alumni_network`, `share_events`, `share_applications`, approved `activities` and `max_suggestions_per_week`. The snapshot must match contact/scope and cannot permit a higher cap than approved. Permission lasts at most 365 days, never refreshes by sync, and covers only listed activities. Freshness/caps/scopes/cooldowns still apply. Contact/scope/cap expansion clears a stored grant and returns to ask-first unless a new matching approval is supplied. Future approval beyond five minutes is rejected. No old `auto_study` metadata is promoted to this permission.
 
-### PUT /api/context
-Body: `{ "policy": {...}, "signals": [ ... up to 60 ... ], "free": [ {start,end} up to 10, ISO with offset ] , "tz": "America/Phoenix" }`
-Behavior: validate, normalize, merge into the student's context record (upsert by type+entity.key, refresh observed_at, drop expired), store policy, store free windows (replace), then run discovery for this student against all other participating students (see below). Respond `200 { "accepted": n, "rejected": [{ "index": i, "reason": "..." }], "signals_total": n, "open_suggestion": true|false }`.
-Idempotent. 60 signals max per call, 200 stored per student.
+## Endpoints
 
-### GET /api/suggestions
-Returns at most ONE suggestion to relay now, plus any agreed outcomes:
-```json
-{ "ask": { "id": "...", "text": "Someone in your CSE 310 section is working on HW4 too and is open to studying with classmates. Want me to see if you'd both like to connect?", "kind": "study", "shared": ["enrolled_in:cse310", "working_on:hw4"], "expires_at": "ISO" } | null,
-  "agreed": [ { "id": "...", "first_name": "Jordan", "contact": "+1 ...", "when": {start,end} | null, "text": "You're on. Jordan said yes too. Thu 7 to 8 pm." } ],
-  "nothing_new": true|false }
-```
-Marking a suggestion as asked happens here (status proposed → asked_a / asked_b). A suggestion already asked and unanswered is returned again only if `expires_at` has not passed (48 h), otherwise expired.
+- `GET /api/capabilities`: public constant `skill_release` and feature list; no student data read or changed. One-time setup requires the matching `2026-10-profile-intros-v3` release. Setup PUTs include `client_release`; mismatches fail before mutation, and matching responses confirm release/intro mode. Older compatible calls without this field preserve their response shape.
 
-### POST /api/suggestions/:id/answer
-Body `{ "answer": "yes" | "no" | "later" }`. Responses: `{ "status": "waiting" }` (other side not yet answered), `{ "status": "agreed", "first_name", "contact", "when", "text" }`, `{ "status": "passed" }`. "later" re-asks after 24 h once. On "no", both sides are cooled down for that pair for 30 days.
+- `PUT /api/context`: `{policy?, signals?, free?, tz?, replace_signals?}`; max 60 signals/call, 200 stored, 10 windows. Validates and upserts by type/key by default; `replace_signals: true` replaces the signal snapshot (the current client uses this to honor retracted offers/preferences). Replaces free windows when supplied. Drops expired/no-longer-permitted signals; opt-out clears signals/free and participant index. Permission restrictions/removals close open suggestions before rediscovery. Returns `{accepted, rejected:[{index,reason}], signals_total, open_suggestion}`. Repeated calls refresh facts without duplicating records.
+- `GET /api/context`: authenticated current policy, fresh signals/free windows, time zone and last update; falls back to a retained alumni profile after context expiry. Used for identity restoration. Never returns another person's profile.
+- `GET /api/suggestions`: `{ask: {id,text,kind,shared,expires_at}|null, agreed:[{id,first_name,contact,when,text}], nothing_new}`. At most one ask. The current client sends `X-Supercub-Delivery: acknowledged`; fetched messages remain pending until explicit acknowledgment. Headerless legacy clients retain fetch-as-delivered behavior for agreed outcomes. Open suggestions are rechecked against current scope, participation, approved activities and fresh evidence.
+- `POST /api/suggestions/:id/delivered`: `{kind:"ask"|"agreed"}` after a successful relay. Only a member of that suggestion can acknowledge it. The acknowledgment is an assistant report, not an independent transport/read receipt. `later` clears ask delivery state so it can be relayed again.
+- Approved profile asks additionally include `profile`, `other_accepted` and `you_accepted`. The server inserts the approved name into the anonymous stored relevance text at read time and uses "Want an intro?" or, after an actual first yes, "They've already said yes. Want the intro?" Phone/email are absent until mutual acceptance. `GET /api/suggestions?id=<uuid>` returns an owned, currently permitted open ask for follow-up questions without consuming delivery or accepting it; the client exposes this as `preview ID`.
+- `POST /api/suggestions/:id/answer`: `{answer:"yes"|"no"|"later"}`. Returns waiting, agreed (+contact/time), passed, or later (+ask_again_at). Errors cover missing/closed/expired/already answered. Later re-asks after 24 hours once; a second later passes. No cools the pair for 30 days.
+- `POST /api/discover`: optional bulk discovery; uses `X-Discover-Secret`, configured by `DISCOVER_SECRET`. Does not send notifications or wake Cubbie. No scheduled cron is established by the existence of this handler.
+- `GET /api/connections`: the caller's retained anonymous connection ids, first/latest introduction dates, counts and own feedback; no peer identifiers, contacts or peer feedback.
+- `POST /api/connections`: `{id, outcome:"met"|"did_not_meet"|"useful"|"not_useful"|"reset"}` for an owned retained connection. Explicit self-report only; `not_useful` suppresses reconnections until reset.
+- Legacy `POST /api/requests`, `GET /api/matches`, `POST /api/respond`: direct request matching remains intact. Names/topics/offers appear under separate join consent; contacts only after both accept.
+- `DELETE /api/me`: deletes contextual and legacy server records for the identity. Client leave additionally deletes its identity/state/policy/context. Cubbie separately cancels check-ins and forgets Super Cub-specific memory. No promise about all Cubbie history/backups or recalling released contacts.
 
-### POST /api/discover (optional, for a Vercel cron hourly)
-Runs discovery across all participating students. Protected by `DISCOVER_SECRET` header. Not required for the demo; discovery already runs on each PUT /api/context.
+Local policy edits reach the server only after a successful sync. A failed sync/deletion is not a successful revocation/deletion. Opt-out preserves the policy record and may retain historical suggestion outcomes; full leave removes those. Direct requests are independent of contextual participation.
 
-## Discovery — Builder A
+Current clients send `context_version` on PUT (null for a new identity). Each successful context write returns a new opaque version to version-aware clients; GET context returns the current version for import/refresh. A stale version receives 409 before changes are applied. The opaque version is retained until leave, independently of signal expiry. `refresh` recovers the current remote snapshot before applying a person's current explicit request. Headerless/versionless older clients remain compatible. This read/check/write guard does not replace cross-record transactions or guarantee ordering of simultaneous writes.
 
-1. Candidate pairs: students who both participate, discoverability compatible (`section` requires a shared enrolled_in with the same detail/section; `school` requires same `school`; `network` anything), share at least one entity key, no open suggestion for either, no suggestion between them in the last 30 days, each under their weekly cap.
-2. Rules prefilter score (0 to 1): same course +0.3; same assignment due within 7 days +0.3; same event within 14 days +0.3; one's `can_help_with` matches other's `working_on`/`interested_in` topic +0.3; both `open_to` a compatible activity +0.2; free windows overlap ≥ 60 min in next 7 days +0.1. Keep pairs ≥ 0.5, top 3 per student.
-3. Relevance judge: if `ANTHROPIC_API_KEY` or AWS Bedrock credentials are present, call a model with BOTH students' signals that are mutually allowed (both have shared that signal type) and ask for JSON `{ "worth": 0..1, "why": "...", "text_for_a": "...", "text_for_b": "..." }`. Hard rule in the prompt and enforced in code: the texts may mention only entities present in both students' signals; never names; never contacts. Threshold 0.6. Model via env `SUPERCUB_MODEL` (default `claude-opus-5-5` on Bedrock, `us-east-1`; Anthropic API if `ANTHROPIC_API_KEY` set). Without credentials, fall back to a template text built from the shared entities, and log `judge: rules`.
-4. Create one `suggestion` record `{ id, a, b, kind, shared, text_a, text_b, why, score, status: proposed, created_at, expires_at }`. One open suggestion per student at a time.
-5. On both yes: pick a meeting window from the intersection of both free lists (≥ 60 min, ≥ 30 min lead), release first names and contacts to each other, status `agreed`. Reuse today's contact release code path.
+Alumni profile/history retention is separate from a participation pause. Disabling alumni or history permission deletes the appropriate durable records; ordinary context/suggestion retention still applies. Full leave additionally deletes profile, relationship records and peer history indexes. No deletion promise covers separately exported identity backup files.
 
-Logging: every judge call stores `why` and `score` on the suggestion so the demo can show the reasoning.
+## Discovery and judging
 
-## Skill — Builder B
+Candidates must participate, satisfy both scope settings, share an approved activity and an entity/aligned subject, have no open suggestion/pair cooldown and remain under caps. Rules score (capped at 1): shared course +0.3; course-to-assignment link +0.3 in addition to course; shared work +0.5 and both due within 7 days +0.1; shared event +0.3 and upcoming within 14 days +0.1; shared interest +0.2; explicit offer/need overlap +0.6; shared activity +0.15; hour of overlapping free time +0.1. Minimum 0.5; up to three candidates go to the judge. A course embedded in an assignment title is a link, not proof of enrollment or ability.
 
-Add a `## Sync` section to `supercub/SKILL.md` and new `connect.py` subcommands. Keep every existing flow (direct asks, matching, noticing, leave) working.
+`concepts.ts` aligns a finite set of subject aliases (such as voice AI/speech recognition) and exact approved topic tags. It does not infer arbitrary semantic similarity or willingness from experience. Directional `can_help_with` ↔ `looking_for`/`working_on`/`interested_in` evidence survives model-input filtering. The judge gets bounded shared views and structured evidence with optional relative deadline/event timing, never one-sided project labels.
 
-### First-time setup (asked once, remembered in Cubbie memory)
-1. "Super Cub can also notice connections on its own. It would share a few facts about your classes and what you're working on with the Super Cub network, never your grades, emails or messages, and only suggest a connection when both people say yes. Want in?" → participating.
-2. If yes: "Who should be able to be matched with you: people in your classes, anyone at your school, or anyone on Super Cub?" default school.
-3. "Can I share names of public-looking events from your calendar and email, like hackathons and career fairs? Yes or no." → share_events, default no.
-4. "How often should I sync and check for suggestions? Every 2 hours works for this week." Create ONE scheduled check-in named so it stands alone later: "supercub: sync. Run the Sync section of the supercub Skill." Student picks interval; default every 2 hours. This check-in replaces the separate noticing and matching check-ins when participating (one check-in does all three).
+Optional Anthropic/Bedrock judge receives restricted shared labels/types, not identity, contact, free-text details or raw source material. Model worth threshold is 0.6. Low-worth pairs cool for six hours; absent/failed model uses rules text. Text guards block common leaks and known one-sided entity labels but do not prove arbitrary paraphrases true. No unsupported expertise/enrollment assertions should be added. Defaults/model IDs are implementation configuration in `judge.ts`, not a guarantee of current provider availability.
 
-### Sync steps (what Cubbie does each run)
-1. Gather, using Cubbie's own abilities: Canvas courses (code, name, section, instructor), assignments due in the next 14 days (title, due); Calendar free blocks ≥ 60 min in the next 7 days during 8 am to 11 pm; if `share_events`, event names in calendar and email events that look like public events (hackathon, career fair, club, talk, workshop); from memory: what the student is working on, interested in, can help with, and is open to; applying_to only if `share_applications`.
-2. Write them as JSON to `~/.config/supercub/context.json` matching the signal schema. No grades, no email subjects, no people's names, no private calendar titles.
-3. Run `python3 scripts/connect.py sync --file ~/.config/supercub/context.json`. The script PUTs context, then GETs suggestions, then prints ONE of: `NOTHING NEW`, `ASK <id>\n<text>`, `AGREED\n<text>\n<contact>`, or `ERROR. ...`.
-4. If `ASK`: text the student exactly the text, then on their reply run `python3 scripts/connect.py answer <id> yes|no|later` and relay (`WAITING` → "I'll let you know what they say.", `AGREED` → the text plus contact, offer calendar, `PASSED` → "No problem.").
-5. If `NOTHING NEW`: say nothing during a scheduled run.
-6. Also run the existing `check` for direct requests in the same sync and combine into one message if both have something.
+A suggestion normally expires after 48 hours; later extends it. Both specific answers or currently covering standing permissions release chosen contacts and an optional >=60-minute overlapping window with >=30-minute lead. This is a proposed time, not a booking or proof of meeting. Cross-record concurrency is not transactional; one-open-suggestion and concurrent-answer guarantees have limits.
 
-### New connect.py commands
-`sync --file PATH` (PUT context then GET suggestions, prints as above), `answer ID yes|no|later`, `policy --participating yes|no --discoverable section|school|network --share-events yes|no` (stores locally and sends with next sync), `context` (prints what is currently stored locally and the last server `accepted`/`rejected` counts, for debugging), `leave` extended to also delete `context.json`.
+For new automatic mode, each side can supply a valid standing setup permission. Its snapshot in `side_*.standing_consent` is not a fabricated `answer: yes`. Two covering permissions can complete on discovery; mixed pairs ask the manual side. No/later before completion overrides standing permission for that suggestion. Agreement revalidates scopes/freshness/permission. Contact/intro/grant/cap changes close affected open suggestions. Agreed views include consent source, approved profile and connection reason, never a false claim of a match-specific yes. Unfetched automatic contacts are not served after standing permission is revoked or the current scope stops permitting them; already fetched/relayed/provider-queued information cannot be recalled. Legacy direct requests are unchanged.
 
-Script constraints: Python 3.12 standard library only, no network except SERVER_URL, HTTPS only, output under 8,000 chars, every error path prints a one-line `ERROR.` code that SKILL.md maps to a friendly sentence. Strip emails and phone numbers from any `detail` before sending as a second guard.
+If both consented to retained connections, agreement stores a relationship with dates/count, a hashed reason signature and private per-person feedback, capped at 200 relationships/person. No old signals or contacts are stored in that history. Rediscovery requires a different current reason signature, expired cooldown, fresh compatible intent and both people's current permissions. Resync timestamps and changing deadline offsets alone are not new reasons. A reconnection uses the same current profile-sharing permission as any other introduction; the prior connection never grants new disclosure rights automatically.
 
-## Tests
+## Client and verification
 
-- Builder A: vitest unit tests for normalization, freshness, reject list, prefilter scoring, judge fallback, suggestion lifecycle, answer paths, delete wipes everything. An in-process two-student scenario: both PUT identical course + assignment signals, GET returns one ask each, both answer yes, both GET agreed with contact. Plus the model judge mocked.
-- Builder B: unittest for `sync`, `answer`, `policy` against a stub HTTP server; a fixture `context.json`; a guard test that a signal containing an email or phone is stripped; validator run on `supercub/` passes.
-- Integration (after both land): the existing pattern of running the real `connect.py` against in-process handlers, extended with the sync scenario.
+`policy` saves local flags (including `--intro ask` revocation, alumni/history/stage/affiliations and `--max-per-week`); `sync [--file PATH]` posts context and pulls results; `answer ID yes|no|later` sends answers; `delivered ID ask|agreed` acknowledges relay. `connections`/`feedback` manage history. `identity export|import --file PATH` privately transfers identity and recovers current remote choices. `context` shows setup release, prepared introduction mode, local choices/signals and last counts; `leave` removes managed state after success. `check`/`status` remain direct-request commands. The client is standard-library-only with bounded output.
 
-## Experiment plan (five real accounts)
+Use `supercub/SKILL.md` for the exact approved setup and relay flow. A requested two-hour check-in is an intended operating cadence, not a verified unattended integration.
 
-1. Push the updated Skill. Each friend texts "update supercub" (or installs), answers the four setup questions, picks every 2 hours.
-2. Over the evening their Cubbies sync Canvas, calendar, memory. Server discovers shared course/assignment/event. Next sync delivers one ask to each side. Both yes → agreed, contacts, time.
-3. We watch `why` and `score` on the server to show reasoning in the video.
-4. Fallback if the model judge has no credentials: rules text; still proves the loop.
+`setup --file PATH --approved-at ISO` is the bundled update command, run only after the person approves the displayed summary. It verifies host metadata, preserves UUID/token, prepares the contact/scope/activity grant when requested, syncs, then records the completed release locally. The metadata timeout is five seconds so the setup remains inside the client's bounded script budget. An old host does not authorize new features; existing choices are unchanged when compatibility fails before sync. `SETUP COMPLETE` confirms this release/mode synced, not that every proposed fact was accepted or an actual message was delivered.
 
-## Open items for Apoorv (not blockers for building)
-
-- Model credentials for the judge on Vercel: either `ANTHROPIC_API_KEY`, or AWS keys from the sandbox2025 account with Bedrock invoke rights (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION=us-east-1`). Without them the server uses rules text.
-- Real-account checks tonight (run in the Opus chat): can a scheduled check-in read memory + Canvas and write a file the script reads; will Cubbie accept a 2-hour check-in; does "what do you remember about me" return useful working_on / interested_in facts.
+Local Vitest/unittest suites use synthetic students and stubs/in-memory handlers, including real Python-to-handler protocol tests and mocked judge calls. Prior notes report real install/HTTPS, three real account context uploads and one real-to-synthetic suggestion; hosted full loops used synthetic participants. Unattended memory+connected-data syncing and a true real-to-real introduction still need evidence. No live seeding or deployment without explicit approval.

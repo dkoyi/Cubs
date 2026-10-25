@@ -21,18 +21,21 @@ import {
   rulesWhy,
   sharedKeys,
   sharedSignals,
+  sharedActivities,
   suggestionKind,
+  connectionEvidence,
 } from "./discovery.js";
 import type { StudentContext } from "./discovery.js";
 import { JUDGE_THRESHOLD } from "./judge.js";
 import type { Judge } from "./judge.js";
 import { describeSpan, firstMeetingTime } from "./match.js";
 import type { TimeWindow } from "./match.js";
-import { CONTEXT_LIMITS, isFresh, isTimeZone, parseFree, parsePolicy, parseSignal, signalId, zoneOffsetMinutes } from "./signals.js";
-import type { Activity, Signal } from "./signals.js";
+import { CONTEXT_LIMITS, isFresh, isTimeZone, parseFree, parsePolicy, parseSignal, signalId, signalPermissionError, standingConsent, zoneOffsetMinutes } from "./signals.js";
+import type { Activity, AutomaticIntroConsent, IntroProfile, Signal } from "./signals.js";
 import type { Store } from "./store.js";
 import { isRecord } from "./validate.js";
 import type { Result } from "./validate.js";
+import { connectionSignature, forgetConnections, forgetContinuity, mayReconnect, relationshipFor, rememberConnection, retainProfile, retainedContext } from "./continuity.js";
 
 const DAY_SECONDS = 24 * 3600;
 const HOUR_MS = 3_600_000;
@@ -48,6 +51,7 @@ const WEEK_MS = 7 * 24 * HOUR_MS;
 
 const k = {
   ctx: (sid: string) => `ctx:${sid}`,
+  version: (sid: string) => `context-version:${sid}`,
   participants: "participants",
   sugg: (id: string) => `sugg:${id}`,
   suggs: (sid: string) => `suggs:${sid}`,
@@ -61,27 +65,39 @@ function parseJson<T>(raw: string | null): T | null {
 // ---------- context ----------
 
 export async function getContext(store: Store, sid: string): Promise<StudentContext | null> {
-  return parseJson<StudentContext>(await store.get(k.ctx(sid)));
+  return parseJson<StudentContext>(await store.get(k.ctx(sid))) ?? await retainedContext(store, sid);
 }
 
 export interface ContextOutcome {
   accepted: number;
   rejected: Array<{ index: number; reason: string }>;
   signals_total: number;
+  context_version?: string;
 }
 
 /** Validates, normalizes and merges a PUT /api/context body into the student's context record. */
 export async function putContext(store: Store, sid: string, body: unknown, now: Date): Promise<Result<ContextOutcome>> {
   const fail = (error: string): Result<ContextOutcome> => ({ ok: false, error });
   if (!isRecord(body)) return fail("Request body must be a JSON object.");
+  const versioned = Object.hasOwn(body, "context_version");
+  if (versioned && body.context_version !== null && typeof body.context_version !== "string") {
+    return fail("context_version must be a string or null.");
+  }
+  if (versioned && body.context_version !== await store.get(k.version(sid))) {
+    return fail("CONTEXT CONFLICT. Your other device changed this profile. Refresh before syncing again.");
+  }
   const existing = await getContext(store, sid);
 
   const policy = parsePolicy(body.policy, existing?.policy ?? null);
   if (!policy.ok) return fail(policy.error);
+  if (policy.value.automatic_intro_consent && Date.parse(policy.value.automatic_intro_consent.approved_at) > now.getTime() + 300_000) return fail("Automatic introduction approval cannot be in the future.");
 
   const rawSignals = body.signals ?? [];
   if (!Array.isArray(rawSignals)) return fail("signals must be a list.");
   const incoming: unknown[] = rawSignals;
+  if (body.replace_signals !== undefined && typeof body.replace_signals !== "boolean") {
+    return fail("replace_signals must be true or false.");
+  }
   if (incoming.length > CONTEXT_LIMITS.signalsPerCall) {
     return fail(`signals can list at most ${CONTEXT_LIMITS.signalsPerCall} per call.`);
   }
@@ -102,11 +118,10 @@ export async function putContext(store: Store, sid: string, body: unknown, now: 
   const p = policy.value;
   // Drop expired signals, and any of a type the student has since stopped sharing.
   const byId = new Map<string, Signal>();
-  if (p.participating) {
+  if (p.participating && body.replace_signals !== true) {
     for (const s of existing?.signals ?? []) {
       if (!isFresh(s, now)) continue;
-      if (s.type === "attending" && !p.share_events && s.source !== "memory" && s.source !== "student") continue;
-      if (s.type === "applying_to" && !p.share_applications) continue;
+      if (signalPermissionError(s.type, s.entity.kind, s.source, p) !== null) continue;
       byId.set(signalId(s), s);
     }
   }
@@ -142,15 +157,36 @@ export async function putContext(store: Store, sid: string, body: unknown, now: 
   };
   if (tz !== undefined) ctx.tz = tz;
   await store.set(k.ctx(sid), JSON.stringify(ctx), CONTEXT_TTL_SECONDS);
+  await retainProfile(store, ctx);
+  if (!p.remember_connections || !p.alumni_network) await forgetConnections(store, sid);
   if (p.participating) await store.sadd(k.participants, sid);
-  else {
-    await store.srem(k.participants, sid);
-    // Opting out closes open suggestions, so an earlier "yes" can no longer release this student's contact.
+  else await store.srem(k.participants, sid);
+
+  const old = existing?.policy;
+  const permissionChanged = old !== undefined && (
+    old.discoverable !== p.discoverable || old.school !== p.school ||
+    old.contact !== p.contact || old.intro !== p.intro || JSON.stringify(old.automatic_intro_consent) !== JSON.stringify(p.automatic_intro_consent) ||
+    old.max_suggestions_per_week !== p.max_suggestions_per_week ||
+    old.life_stage !== p.life_stage || old.alumni_network !== p.alumni_network ||
+    Boolean(old.share_intro_profile) !== p.share_intro_profile || JSON.stringify(old.intro_profile) !== JSON.stringify(p.intro_profile) ||
+    JSON.stringify(old.affiliations ?? []) !== JSON.stringify(p.affiliations) ||
+    (old.share_events && !p.share_events) || (old.share_applications && !p.share_applications)
+  );
+  // Cached asks may expose context that is no longer permitted. Close them before discovery
+  // runs again; a previous yes must not survive a narrower sharing policy.
+  const signalsRemoved = (existing?.signals ?? []).some((s) => {
+    const next = byId.get(signalId(s));
+    return next === undefined || (s.topics ?? []).some((topic) => !(next.topics ?? []).includes(topic));
+  });
+  if (!p.participating || permissionChanged || signalsRemoved) {
     for (const s of await listSuggestions(store, sid, now)) {
       if (isOpen(s)) await putSuggestion(store, { ...s, status: "passed" });
     }
   }
-  return { ok: true, value: { accepted, rejected, signals_total: ctx.signals.length } };
+  const version = randomUUID();
+  await store.set(k.version(sid), version);
+  return { ok: true, value: { accepted, rejected, signals_total: ctx.signals.length,
+    ...(versioned ? { context_version: version } : {}) } };
 }
 
 // ---------- suggestions ----------
@@ -165,6 +201,9 @@ export interface SideState {
   later_used: boolean;
   /** True once this side has been sent the agreed outcome by GET /api/suggestions. */
   agreed_seen: boolean;
+  ask_delivered_at?: string | null;
+  /** A snapshot of explicit standing permission; never fabricate an answer of yes. */
+  standing_consent?: AutomaticIntroConsent | null;
 }
 
 export interface Release {
@@ -196,6 +235,8 @@ export interface Suggestion {
   /** Filled at agreement: what each side releases to the other. */
   release_a: Release | null;
   release_b: Release | null;
+  connection_signature?: string;
+  reconnecting?: boolean;
 }
 
 const newSide = (): SideState => ({ asked_at: null, answer: null, later_until: null, later_used: false, agreed_seen: false });
@@ -276,6 +317,7 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
       continue;
     }
     if (!other.policy.participating || !discoverableTo(me, other, now)) continue;
+    if (suggestionKind(me, other, now) === null) continue;
     if (sharedKeys(me, other, now).size === 0) continue;
     const prefilter = prefilterScore(me, other, now);
     if (prefilter < PREFILTER_MIN) continue;
@@ -287,6 +329,12 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
   candidates.sort((x, y) => y.prefilter - x.prefilter || x.other.updated_at.localeCompare(y.other.updated_at));
 
   for (const { other, prefilter } of candidates.slice(0, CANDIDATES_PER_STUDENT)) {
+    const kind = suggestionKind(me, other, now);
+    if (kind === null) continue;
+    const evidence = connectionEvidence(me, other, now);
+    const signature = connectionSignature(sid, other.student_id, evidence, kind);
+    const previous = await relationshipFor(store, sid, other.student_id);
+    if (!mayReconnect(previous, signature)) continue;
     const shared = sharedSignals(me, other, now);
     let textA = rulesText(me, other, now);
     let textB = rulesText(other, me, now);
@@ -296,7 +344,7 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
     let textsFrom: Suggestion["texts_from"] = "rules";
 
     const [mutualA, mutualB] = mutualSignals(me, other, now);
-    const verdict = judge === null ? null : await judge.judge({ shared, a: mutualA, b: mutualB, prefilter });
+    const verdict = judge === null ? null : await judge.judge({ shared: shared.slice(0, 48), a: mutualA.slice(0, 48), b: mutualB.slice(0, 48), prefilter, evidence, reconnecting: previous !== null });
     if (verdict === null) {
       console.log(judge === null ? "judge: rules" : `judge: rules (${judge.name} gave no usable answer)`);
     } else {
@@ -319,6 +367,12 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
       }
     }
 
+    if (previous !== null) {
+      // Keep the reconnection explanation grounded, regardless of model phrasing.
+      textA = rulesText(me, other, now).replace(/^Someone/, "Someone you've connected with before");
+      textB = rulesText(other, me, now).replace(/^Someone/, "Someone you've connected with before");
+      textsFrom = "rules";
+    }
     const id = randomUUID();
     // Claiming the pair key first keeps two concurrent syncs from creating the same pair twice.
     if (!(await store.setIfAbsent(k.pair(sid, other.student_id), id, COOLDOWN_SECONDS))) continue;
@@ -326,7 +380,9 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
       id,
       a: sid,
       b: other.student_id,
-      kind: suggestionKind(me, other, now),
+      kind,
+      connection_signature: signature,
+      reconnecting: previous !== null,
       shared,
       text_a: textA,
       text_b: textB,
@@ -345,10 +401,13 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
       release_a: null,
       release_b: null,
     };
+    const consentA = standingConsent(me.policy, kind, now), consentB = standingConsent(other.policy, kind, now);
+    if (consentA) suggestion.side_a.standing_consent = consentA;
+    if (consentB) suggestion.side_b.standing_consent = consentB;
     await putSuggestion(store, suggestion);
     await store.sadd(k.suggs(sid), id, SUGGESTION_TTL_SECONDS);
     await store.sadd(k.suggs(other.student_id), id, SUGGESTION_TTL_SECONDS);
-    return suggestion;
+    return await finishWithConsent(store, suggestion, now) ?? suggestion;
   }
   return null;
 }
@@ -371,6 +430,10 @@ export interface AskView {
   kind: Activity;
   shared: string[];
   expires_at: string;
+  profile?: IntroProfile;
+  other_accepted?: boolean;
+  you_accepted?: boolean;
+  other_consent?: "standing" | "explicit";
 }
 
 export interface AgreedView {
@@ -379,11 +442,53 @@ export interface AgreedView {
   contact: string | null;
   when: TimeWindow | null;
   text: string;
+  profile?: IntroProfile;
+  consent?: { you: "standing" | "explicit"; other: "standing" | "explicit" };
+  reason?: string;
 }
 
 const sideOf = (s: Suggestion, sid: string): "a" | "b" => (s.a === sid ? "a" : "b");
 
 const pad = (n: number): string => String(n).padStart(2, "0");
+
+async function stillPermitted(store: Store, s: Suggestion, now: Date): Promise<boolean> {
+  const a = await getContext(store, s.a);
+  const b = await getContext(store, s.b);
+  return a !== null && b !== null && a.policy.participating && b.policy.participating &&
+    discoverableTo(a, b, now) && sharedActivities(a, b, now).includes(s.kind) && prefilterScore(a, b, now) >= PREFILTER_MIN;
+}
+
+/** Keep stored/model-written reasons anonymous; compose identity only at read time. */
+async function askView(store: Store, s: Suggestion, sid: string, now: Date): Promise<AskView> {
+  const mine = sideOf(s, sid);
+  const side = mine === "a" ? s.side_a : s.side_b;
+  const otherSide = mine === "a" ? s.side_b : s.side_a;
+  const other = await getContext(store, mine === "a" ? s.b : s.a);
+  const otherStanding = other !== null && activeStanding(otherSide, other, s.kind, now) !== null;
+  const view: AskView = { id: s.id, text: mine === "a" ? s.text_a : s.text_b, kind: s.kind, shared: s.shared, expires_at: s.expires_at };
+  const profile = other?.policy.share_intro_profile ? other.policy.intro_profile : undefined;
+  if (profile === undefined) return view;
+  const reason = view.text.replace(/\s*Want me to see if you'd both like to connect\?$/i, "")
+    .replace(/\s*Want (?:an intro|to connect)\?$/i, "")
+    .replace(/^Someone you've connected with before/, "Someone");
+  // Inserting the approved display name after the model guard avoids model-invented identities.
+  const named = /\bsomeone\b/i.test(reason) ? reason.replace(/\bsomeone\b/i, () => profile.name) : `${profile.name}: ${reason}`;
+  const question = (s.reconnecting ? "You've connected before. " : "") + (side.answer === "yes" ? "You've said yes. I'll let you know when they answer." :
+    otherStanding ? "They've opted into automatic introductions. Want the intro?" : otherSide.answer === "yes" ? "They've already said yes. Want the intro?" : "Want an intro?");
+  const budget = 399 - question.length;
+  const body = named.length <= budget ? named : `${named.slice(0, budget - 3).trimEnd()}...`;
+  return { ...view, text: `${body} ${question}`, profile, other_accepted: otherSide.answer === "yes" || otherStanding, you_accepted: side.answer === "yes",
+    ...(otherStanding ? { other_consent: "standing" as const } : {}) };
+}
+
+/** On-demand details for a follow-up such as "Who is it?" or "Link?", without consuming delivery. */
+export async function previewSuggestion(store: Store, sid: string, id: string, now: Date): Promise<AskView | null> {
+  const found = await getSuggestion(store, id);
+  if (found === null || (found.a !== sid && found.b !== sid)) return null;
+  const s = await settle(store, found, now);
+  if (!isOpen(s) || !(await stillPermitted(store, s, now))) return null;
+  return askView(store, s, sid, now);
+}
 
 /** "2026-10-25T19:00:00-07:00": the instant written at the given UTC offset. */
 export function isoAtOffset(iso: string, offsetMinutes: number): string {
@@ -395,8 +500,20 @@ export function isoAtOffset(iso: string, offsetMinutes: number): string {
 /** The agreed outcome as one student sees it, with times at that student's UTC offset. */
 async function agreedView(store: Store, s: Suggestion, sid: string): Promise<AgreedView> {
   const other = (sideOf(s, sid) === "a" ? s.release_b : s.release_a) ?? { first_name: "", contact: null };
-  const head = `You're on. ${other.first_name} said yes too.`;
+  const mine = sideOf(s, sid);
+  const ownStanding = Boolean((mine === "a" ? s.side_a : s.side_b).standing_consent);
+  const otherStanding = Boolean((mine === "a" ? s.side_b : s.side_a).standing_consent);
+  const head = ownStanding || otherStanding ? `You're connected with ${other.first_name}. ${otherStanding ? "They approved automatic introductions" : "They accepted this introduction"}.` : `You're on. ${other.first_name} said yes too.`;
   const view: AgreedView = { id: s.id, first_name: other.first_name, contact: other.contact, when: null, text: "" };
+  if (ownStanding || otherStanding) {
+    view.consent = { you: ownStanding ? "standing" : "explicit", other: otherStanding ? "standing" : "explicit" };
+    const ctx = await getContext(store, mine === "a" ? s.b : s.a);
+    if (ctx?.policy.share_intro_profile && ctx.policy.intro_profile) view.profile = ctx.policy.intro_profile;
+    const rawReason = (mine === "a" ? s.text_a : s.text_b)
+      .replace(/\s*Want me to see if you'd both like to connect\?$/i, "")
+      .replace(/\s*[^.?!]*\?$/, "");
+    view.reason = rawReason.replace(/\bsomeone\b/i, () => view.profile?.name ?? other.first_name).slice(0, 350);
+  }
   if (s.when === null) return { ...view, text: `${head} Pick a time that works for you both.` };
   const ctx = await getContext(store, sid);
   const offset = (ctx?.tz === undefined ? null : zoneOffsetMinutes(ctx.tz, new Date(s.when.start))) ?? 0;
@@ -414,24 +531,37 @@ export interface SuggestionsOutcome {
 }
 
 /** GET /api/suggestions: at most one ask to relay now, plus agreed outcomes not yet delivered. */
-export async function pendingFor(store: Store, sid: string, now: Date): Promise<SuggestionsOutcome> {
+export async function pendingFor(store: Store, sid: string, now: Date, acknowledgedDelivery = false): Promise<SuggestionsOutcome> {
   const list = await listSuggestions(store, sid, now);
+  for (const [index, suggestion] of list.entries()) {
+    if (isOpen(suggestion)) list[index] = await finishWithConsent(store, suggestion, now) ?? suggestion;
+  }
 
   const agreed: AgreedView[] = [];
   for (const s of list) {
     const side = sideOf(s, sid) === "a" ? s.side_a : s.side_b;
     if (s.status !== "agreed" || side.agreed_seen) continue;
+    if (!(await standingAgreementReadable(store, s, now))) continue;
     agreed.push(await agreedView(store, s, sid));
-    const seen: SideState = { ...side, agreed_seen: true };
-    await putSuggestion(store, sideOf(s, sid) === "a" ? { ...s, side_a: seen } : { ...s, side_b: seen });
+    if (!acknowledgedDelivery) {
+      const seen: SideState = { ...side, agreed_seen: true };
+      await putSuggestion(store, sideOf(s, sid) === "a" ? { ...s, side_a: seen } : { ...s, side_b: seen });
+    }
   }
 
   let ask: AskView | null = null;
   for (const s of list) {
     if (!isOpen(s)) continue;
+    if (!(await stillPermitted(store, s, now))) {
+      await putSuggestion(store, { ...s, status: "passed" });
+      continue;
+    }
     const mine = sideOf(s, sid);
     const side = mine === "a" ? s.side_a : s.side_b;
     if (side.answer !== null) continue;
+    const ctx = await getContext(store, sid);
+    if (ctx !== null && activeStanding(side, ctx, s.kind, now) !== null) continue;
+    if (acknowledgedDelivery && side.ask_delivered_at) continue;
     if (side.later_until !== null && Date.parse(side.later_until) > now.getTime()) continue;
     const asked: SideState = {
       ...side,
@@ -441,13 +571,7 @@ export async function pendingFor(store: Store, sid: string, now: Date): Promise<
     const updated: Suggestion = mine === "a" ? { ...s, side_a: asked } : { ...s, side_b: asked };
     updated.status = askedStatus(updated);
     await putSuggestion(store, updated);
-    ask = {
-      id: s.id,
-      text: mine === "a" ? s.text_a : s.text_b,
-      kind: s.kind,
-      shared: s.shared,
-      expires_at: s.expires_at,
-    };
+    ask = await askView(store, s, sid, now);
     break;
   }
   return { ask, agreed, nothing_new: ask === null && agreed.length === 0 };
@@ -482,13 +606,18 @@ export async function answerSuggestion(
   const found = await getSuggestion(store, id);
   if (found === null || (found.a !== sid && found.b !== sid)) return { kind: "not_found" };
   const s = await settle(store, found, now);
-  if (s.status === "agreed") return { kind: "agreed", view: await agreedView(store, s, sid) };
+  if (s.status === "agreed") return await standingAgreementReadable(store, s, now) ?
+    { kind: "agreed", view: await agreedView(store, s, sid) } : { kind: "passed" };
   if (s.status === "passed") {
     // The student who said no already answered; the other side learns it passed.
     const own = sideOf(s, sid) === "a" ? s.side_a : s.side_b;
     return own.answer === "no" ? { kind: "already_answered" } : { kind: "passed" };
   }
   if (s.status === "expired") return { kind: "expired" };
+  if (!(await stillPermitted(store, s, now))) {
+    await putSuggestion(store, { ...s, status: "passed" });
+    return { kind: "passed" };
+  }
 
   const mine = sideOf(s, sid);
   const side = mine === "a" ? s.side_a : s.side_b;
@@ -503,7 +632,7 @@ export async function answerSuggestion(
     const until = new Date(now.getTime() + LATER_HOURS * HOUR_MS);
     const extended = new Date(Math.max(Date.parse(s.expires_at), until.getTime() + ASK_HOURS * HOUR_MS));
     await putSuggestion(store, {
-      ...withSide({ ...side, later_until: until.toISOString(), later_used: true }),
+      ...withSide({ ...side, later_until: until.toISOString(), later_used: true, ask_delivered_at: null, standing_consent: null }),
       expires_at: extended.toISOString(),
     });
     return { kind: "later", ask_again_at: until.toISOString() };
@@ -516,18 +645,42 @@ export async function answerSuggestion(
     return { kind: "passed" };
   }
 
-  const answered = withSide({ ...side, answer: "yes", later_until: null, asked_at: side.asked_at ?? now.toISOString() });
-  if (theirs.answer !== "yes") {
+  const answered = withSide({ ...side, answer: "yes", standing_consent: null, later_until: null, asked_at: side.asked_at ?? now.toISOString() });
+  const finished = await finishWithConsent(store, answered, now);
+  if (finished === null) {
     answered.status = askedStatus(answered);
     await putSuggestion(store, answered);
     return { kind: "waiting" };
   }
 
-  // Both said yes: pick a meeting window and release first names and contacts to each other.
+  return { kind: "agreed", view: await agreedView(store, finished, sid) };
+}
+
+function activeStanding(side: SideState, ctx: StudentContext, kind: Activity, now: Date): AutomaticIntroConsent | null {
+  if (side.answer !== null || !side.standing_consent || side.later_until !== null) return null;
+  const current = standingConsent(ctx.policy, kind, now);
+  return current?.approved_at === side.standing_consent.approved_at ? current : null;
+}
+
+/** Do not disclose an unfetched standing-permission contact after that permission was revoked. */
+async function standingAgreementReadable(store: Store, s: Suggestion, now: Date): Promise<boolean> {
+  if (!s.side_a.standing_consent && !s.side_b.standing_consent) return true;
+  const a = await getContext(store, s.a), b = await getContext(store, s.b);
+  if (!a || !b || !a.policy.participating || !b.policy.participating || !discoverableTo(a, b, now)) return false;
+  return (!s.side_a.standing_consent || activeStanding(s.side_a, a, s.kind, now) !== null) &&
+    (!s.side_b.standing_consent || activeStanding(s.side_b, b, s.kind, now) !== null);
+}
+
+/** Shared completion path: two real explicit permissions, from answers or bounded setup grants. */
+async function finishWithConsent(store: Store, s: Suggestion, now: Date): Promise<Suggestion | null> {
+  if (!isOpen(s) || !(await stillPermitted(store, s, now))) return null;
   const ctxA = await getContext(store, s.a);
   const ctxB = await getContext(store, s.b);
+  if (!ctxA || !ctxB) return null;
+  if (!(s.side_a.answer === "yes" || activeStanding(s.side_a, ctxA, s.kind, now)) ||
+      !(s.side_b.answer === "yes" || activeStanding(s.side_b, ctxB, s.kind, now))) return null;
   const agreed: Suggestion = {
-    ...answered,
+    ...s,
     status: "agreed",
     agreed_at: now.toISOString(),
     when: firstMeetingTime(ctxA?.free ?? [], ctxB?.free ?? [], now, MEETING_MINUTES),
@@ -535,13 +688,29 @@ export async function answerSuggestion(
     release_b: await release(store, s.b),
   };
   await putSuggestion(store, agreed);
-  return { kind: "agreed", view: await agreedView(store, agreed, sid) };
+  if (ctxA !== null && ctxB !== null) {
+    await rememberConnection(store, ctxA, ctxB, s.id, s.connection_signature ?? "legacy", now);
+  }
+  return agreed;
+}
+
+/** Explicit acknowledgment after the assistant successfully relays a message. */
+export async function acknowledgeDelivery(store: Store, sid: string, id: string, kind: "ask" | "agreed", now: Date): Promise<boolean> {
+  const s = await getSuggestion(store, id);
+  if (s === null || (s.a !== sid && s.b !== sid)) return false;
+  if (kind === "agreed" ? s.status !== "agreed" : !isOpen(await settle(store, s, now))) return false;
+  const mine = sideOf(s, sid);
+  const side = mine === "a" ? s.side_a : s.side_b;
+  const next = kind === "agreed" ? { ...side, agreed_seen: true } : { ...side, ask_delivered_at: now.toISOString() };
+  await putSuggestion(store, mine === "a" ? { ...s, side_a: next } : { ...s, side_b: next });
+  return true;
 }
 
 // ---------- leaving ----------
 
 /** Deletes the student's context, every suggestion they are part of (with both sides' answers) and their pair cooldowns. */
 export async function deleteLoopData(store: Store, sid: string): Promise<void> {
+  await forgetContinuity(store, sid);
   for (const id of await store.smembers(k.suggs(sid))) {
     const s = await getSuggestion(store, id);
     if (s !== null) {
@@ -552,5 +721,5 @@ export async function deleteLoopData(store: Store, sid: string): Promise<void> {
     await store.del([k.sugg(id)]);
   }
   await store.srem(k.participants, sid);
-  await store.del([k.ctx(sid), k.suggs(sid)]);
+  await store.del([k.ctx(sid), k.suggs(sid), k.version(sid)]);
 }
