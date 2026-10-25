@@ -394,15 +394,13 @@ class SyncSkillMdTests(unittest.TestCase):
     def test_setup_questions_and_check_in_wording(self) -> None:
         sync = self.text.split("## Sync", 1)[1].split("\n## ", 1)[0]
         for line in (
-            "Super Cub can also notice connections on its own. It would share a few facts about your classes and "
-            "what you're working on with the Super Cub network, never your grades, emails or messages, and only "
-            "suggest a connection when both people say yes. You'd be open to study partners, teammates, meals and "
-            "buddies, and you can change that with one text. Want in?",
-            "Who should be able to be matched with you: people in your classes, anyone at your school, or anyone "
-            "on Super Cub?",
-            "Can I share names of public-looking events from your calendar and email, like hackathons and career "
-            "fairs? Yes or no.",
-            "How often should I sync and check for suggestions? Every 2 hours works for this week.",
+            "Super Cub notices connections for you. It shares a few facts about your classes and what you're "
+            "working on with the Super Cub network, never your grades, emails or messages, and only suggests a "
+            "connection when both people say yes. Defaults: anyone on Super Cub can be matched with you, public "
+            "events like hackathons count, you're open to study partners, teammates, meals and buddies, I sync "
+            "every 2 hours, and your phone number is shared only after a mutual yes. Say yes, or tell me what to "
+            "change.",
+            "policy --participating yes --discoverable network --share-events yes",
             "supercub: sync. Run the Sync section of the supercub Skill.",
             "connect.py sync --file ~/.config/supercub/context.json",
             "assets/context-example.json",

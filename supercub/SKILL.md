@@ -163,19 +163,20 @@ Sync is how Super Cub notices on its own. On a schedule, you gather a few facts 
 
 ### First-time setup
 
-Ask these once, one text at a time, the first time the student uses Super Cub after installing or updating it. Remember the answers in the student's Cubbie memory and don't ask again.
+One question, once, the first time the student uses Super Cub after installing or updating it. Remember the answer in the student's Cubbie memory and don't ask again.
 
-1. "Super Cub can also notice connections on its own. It would share a few facts about your classes and what you're working on with the Super Cub network, never your grades, emails or messages, and only suggest a connection when both people say yes. You'd be open to study partners, teammates, meals and buddies, and you can change that with one text. Want in?"
+1. Send this, as one text:
+   "Super Cub notices connections for you. It shares a few facts about your classes and what you're working on with the Super Cub network, never your grades, emails or messages, and only suggests a connection when both people say yes. Defaults: anyone on Super Cub can be matched with you, public events like hackathons count, you're open to study partners, teammates, meals and buddies, I sync every 2 hours, and your phone number is shared only after a mutual yes. Say yes, or tell me what to change."
    On no, run `python3 scripts/connect.py policy --participating no`, and stop. Noticing still works.
-2. "Who should be able to be matched with you: people in your classes, anyone at your school, or anyone on Super Cub?" Classes is `section`, school is `school`, anyone is `network`. Default `school`.
-3. "Can I share names of public-looking events from your calendar and email, like hackathons and career fairs? Yes or no." Default no.
-   Then you MUST run the policy command with THEIR answers, not the defaults. Saying yes in chat does nothing until this runs. Example for "anyone" and "yes": `python3 scripts/connect.py policy --participating yes --discoverable network --share-events yes`. Expect `POLICY SAVED. Participating: yes.` If it says `Participating: no`, run it again.
-4. "How often should I sync and check for suggestions? Every 2 hours works for this week." Default every 2 hours, running for the next 30 days (Cubbie needs an end date for a repeating check-in; use 30 days from today without asking). Create ONE scheduled check-in at that interval, named so it stands alone later: "supercub: sync. Run the Sync section of the supercub Skill." It replaces the noticing and matching check-ins, so cancel those if they exist.
+   If they change something, map it: "only my classes" is `--discoverable section`, "only my school" is `--discoverable school`, "no events" is `--share-events no`, a different interval is the check-in interval, a different email or number is the contact. Don't ask follow-up questions unless their change is unclear.
+2. Then you MUST run the policy command with their answers. Saying yes in chat does nothing until this runs. Default: `python3 scripts/connect.py policy --participating yes --discoverable network --share-events yes`. Expect `POLICY SAVED. Participating: yes.` If it says `Participating: no`, run it again.
+3. Contact: use the phone number this chat is on, unless they gave a different email or number. Remember it. Ask only if you have neither.
+4. Create ONE scheduled check-in, every 2 hours unless they changed it, running for the next 30 days (Cubbie needs an end date for a repeating check-in; use 30 days from today without asking), named so it stands alone later: "supercub: sync. Run the Sync section of the supercub Skill." It replaces the noticing and matching check-ins, so cancel those if they exist.
 5. Run the first sync right away, following "Each sync" below, so the student is on the network before the first scheduled run. Then tell them in one line what happened: "You're in. Nothing to suggest yet; I'll check every 2 hours." or relay the suggestion.
 
-Setup is done only when `python3 scripts/connect.py context` shows `Participating: yes` and a sync has run. If either is missing, finish it before saying setup is done.
+Setup is done only when `python3 scripts/connect.py context` shows `Participating: yes` and a sync has run. If either is missing, finish it before saying setup is done. The whole setup should take one reply from the student.
 
-If you don't remember a contact for them, ask step 5's question once. To change an answer later, run `policy` with just that flag. If they want to stop, run `policy --participating no`, sync once so the server knows, and cancel the sync check-in.
+To change an answer later, run `policy` with just that flag; "only my classes", "no events", "add rides" or "sync every 30 minutes" each map to one change. If they want to stop, run `policy --participating no`, sync once so the server knows, and cancel the sync check-in.
 
 ### Each sync
 
