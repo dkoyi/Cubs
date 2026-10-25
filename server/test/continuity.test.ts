@@ -161,10 +161,11 @@ describe("complementary discovery and messages", () => {
     await put(b, context("Jordan", [signal("can_help_with", "speech recognition")]));
     expect(calls).toHaveLength(1);
     const call = calls[0];
-    expect(call?.a).toContainEqual({ type: "can_help_with", kind: "topic", label: "voice AI" });
-    expect(call?.b).toContainEqual({ type: "looking_for", kind: "topic", label: "voice AI" });
+    // The model sees each person's own approved labels; the aligned subject travels as evidence.
+    expect(call?.a).toContainEqual({ type: "can_help_with", kind: "topic", label: "speech recognition" });
+    expect(call?.b).toContainEqual({ type: "looking_for", kind: "topic", label: "voice AI assistant" });
     expect(call?.evidence).toContainEqual({ label: "voice AI", a_type: "can_help_with", b_type: "looking_for", relation: "a_offers_help" });
-    expect(JSON.stringify(call)).not.toMatch(/Alex|Jordan|example.edu|voice AI assistant/);
+    expect(JSON.stringify(call)).not.toMatch(/Alex|Jordan|example.edu/);
     expect((await pending(a)).ask?.text).toContain("offered to help with voice AI");
   });
 

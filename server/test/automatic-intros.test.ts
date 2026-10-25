@@ -122,11 +122,11 @@ describe("bounded standing introduction permission", () => {
     const caps = await handleCapabilities(new Request("https://supercub.test/api/capabilities"), deps);
     expect(await caps.json()).toEqual({ skill_release: SKILL_RELEASE, capabilities: CAPABILITIES });
   });
-  it("automatic intro text says the name once, after Meet, and keeps the named reason separately", async () => {
+  it("automatic intro text says the name once, as the start of the reason, and keeps the named reason separately", async () => {
     const cases: Array<[string, string]> = [
-      ["Someone is also attending Dev Hacks.", "Meet Jordan. They're also attending Dev Hacks."],
-      ["Someone has offered to help with healthcare.", "Meet Jordan. They have offered to help with healthcare."],
-      ["Someone's working on healthcare too.", "Meet Jordan. They're working on healthcare too."],
+      ["Someone is also attending Dev Hacks.", "Jordan is also attending Dev Hacks."],
+      ["Someone has offered to help with healthcare.", "Jordan has offered to help with healthcare."],
+      ["Someone's working on healthcare too.", "Jordan's working on healthcare too."],
     ];
     for (const [reason, head] of cases) {
       store = new InMemoryStore(() => now);

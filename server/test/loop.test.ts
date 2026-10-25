@@ -577,7 +577,7 @@ describe("model judge (mocked)", () => {
     expect(stored.why).toBe("Same course and assignment due soon.");
   });
 
-  it("never sends the model an entity only one student has", async () => {
+  it("sends the model each person's own approved signals, never names or contacts", async () => {
     const judge = mockJudge(() => null);
     deps.judge = judge;
     const a = newStudent();
@@ -586,8 +586,9 @@ describe("model judge (mocked)", () => {
     await handlePutContext(put(a, alexCtx), deps);
     await handlePutContext(put(b, context("Jordan", "jordan@example.edu", jordanCtx.free, extra)), deps);
     expect(judge.calls).toHaveLength(1);
-    expect(JSON.stringify(judge.calls[0])).not.toContain("PSY");
+    expect(JSON.stringify(judge.calls[0])).toContain("PSY 366");
     expect(JSON.stringify(judge.calls[0])).toContain("CSE 310");
+    expect(JSON.stringify(judge.calls[0])).not.toMatch(/Alex|Jordan|example\.edu/);
   });
 
   it("falls back to the rules text when the model text names someone or shares contacts, but keeps complementary reasons", async () => {
@@ -697,8 +698,8 @@ describe("undated memory signals (synthetic adaptations with explicit activity a
     const judge = mockJudge((req) => ({
       worth: 0.7,
       why: "Same course.",
-      text_for_a: req.a.some((s) => s.type === "enrolled_in") ? textB : textC,
-      text_for_b: req.b.some((s) => s.type === "enrolled_in") ? textB : textC,
+      text_for_a: req.a.some((s) => s.type === "enrolled_in" && s.label === "CSE 240") ? textB : textC,
+      text_for_b: req.b.some((s) => s.type === "enrolled_in" && s.label === "CSE 240") ? textB : textC,
     }));
     deps.judge = judge;
     const b = newStudent();
@@ -709,11 +710,9 @@ describe("undated memory signals (synthetic adaptations with explicit activity a
     const req = judge.calls[0];
     expect(req?.shared).toEqual(["enrolled_in:cse240", "open_to:study"]);
     expect(req?.prefilter).toBe(0.75);
-    // C discovered B: C is side a. Both sides see the course, never the assignment title or other courses.
-    expect(req?.a).toContainEqual({ type: "working_on", kind: "course", label: "CSE 240" });
+    // C discovered B: C is side a. Each side sends its own approved labels to the model.
     expect(req?.b).toContainEqual({ type: "enrolled_in", kind: "course", label: "CSE 240" });
-    expect(JSON.stringify(req)).not.toContain("Project 1");
-    expect(JSON.stringify(req)).not.toContain("CSE 230");
+    expect(req?.a.some((s) => s.type === "working_on" && s.label.includes("CSE 240"))).toBe(true);
 
     const viewB = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(b), deps));
     const viewC = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(c), deps));
