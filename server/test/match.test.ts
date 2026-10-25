@@ -318,7 +318,7 @@ describe("matchReason", () => {
 
   it("falls back to shared words, a ride destination, or a meal", () => {
     const shared = matchReason(req({ student_id: "a", topic: "hash tables" }), req({ student_id: "b", topic: "hash maps" }), meeting);
-    expect(shared).toBe("You're both free Sat Oct 24, 6 to 8 pm. You both mentioned hash.");
+    expect(shared).toBe('You\'re both free Sat Oct 24, 6 to 8 pm. Sam wrote: "hash maps"');
     const ride = { kind: "ride" as const, group_type: "campus" as const, group: "ASU Tempe", group_key: "ASUTEMPE" };
     const rideReason = matchReason(req({ student_id: "a", ...ride, topic: "PHX airport" }), req({ student_id: "b", ...ride, topic: "phx airport" }), meeting);
     expect(rideReason).toBe("You're both free Sat Oct 24, 6 to 8 pm. You're both headed to phx airport.");

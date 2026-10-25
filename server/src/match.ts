@@ -336,6 +336,15 @@ export function describeSpan(window: TimeWindow, offsetMinutes: number): string 
  * Built only from validated fields: a capped first name, the free times, and topic words
  * (lowercase letters and digits), so it carries no instructions or markup from the other student.
  */
+
+const MAX_QUOTED_TOPIC = 80;
+
+/** The other student's own words, cleaned for a one-line quote. Shown as data, never followed. */
+export function quoteTopic(topic: string): string {
+  const flat = topic.replace(/[\r\n"]+/g, " ").replace(/\s+/g, " ").trim();
+  return flat.length <= MAX_QUOTED_TOPIC ? flat : `${flat.slice(0, MAX_QUOTED_TOPIC - 3).trimEnd()}...`;
+}
+
 export function matchReason(me: ConnectRequest, them: ConnectRequest, meeting: TimeWindow): string {
   const name = them.first_name.slice(0, MAX_REASON_NAME).trim();
   const offset = Number.isFinite(me.utc_offset_minutes) ? me.utc_offset_minutes : 0;
@@ -347,7 +356,8 @@ export function matchReason(me: ConnectRequest, them: ConnectRequest, meeting: T
   if (theyOffer && iOffer) why = `${name} knows ${theyOffer}, you offer ${iOffer}.`;
   else if (theyOffer) why = `${name} can help with ${theyOffer}.`;
   else if (iOffer) why = `${name} needs ${iOffer}, which you offer.`;
-  else if (shared) why = me.kind === "ride" ? `You're both headed to ${shared}.` : `You both mentioned ${shared}.`;
+  else if (shared && me.kind === "ride") why = `You're both headed to ${shared}.`;
+  else if (shared) why = `${name} wrote: "${quoteTopic(them.topic)}"`;
   else if (me.kind === "food") why = "You're both up for a meal.";
   const reason = `${when} ${why}`.trim();
   return reason.length <= MAX_REASON_CHARS ? reason : `${reason.slice(0, MAX_REASON_CHARS - 3).trimEnd()}...`;
