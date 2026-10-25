@@ -30,18 +30,26 @@ OFFSET = timezone(timedelta(hours=-7))
 # Overlaps are chosen to touch the three real accounts seen tonight:
 # Cubbie Hackathon + AI project (Apoorv), CSE 240 (Malaika), CSE 240 Project 1 / Adobe hackathon (Dhanush).
 DEMO = [
-    ("Demo Priya", [("attending", "event", "Cubbie Hackathon"), ("working_on", "topic", "AI project"),
-                    ("interested_in", "topic", "voice AI"), ("open_to", "activity", "teammates")]),
-    ("Demo Marcus", [("attending", "event", "Cubbie Hackathon"), ("interested_in", "topic", "frontend design"),
-                     ("can_help_with", "topic", "React"), ("open_to", "activity", "teammates")]),
-    ("Demo Sofia", [("enrolled_in", "course", "CSE 240"), ("working_on", "topic", "CSE 240 Project 1"),
-                    ("open_to", "activity", "study")]),
-    ("Demo Wei", [("enrolled_in", "course", "CSE 240"), ("enrolled_in", "course", "MAT 243"),
+    ("Demo Priya", "Building a voice AI study helper", [("attending", "event", "Cubbie Hackathon"), ("working_on", "topic", "AI project"),
+                    ("interested_in", "topic", "voice AI"), ("looking_for", "topic", "frontend help"), ("open_to", "activity", "teammates")]),
+    ("Demo Marcus", "Frontend dev, React and design systems", [("attending", "event", "Cubbie Hackathon"), ("interested_in", "topic", "frontend design"),
+                     ("can_help_with", "topic", "React"), ("open_to", "activity", "teammates"), ("open_to", "activity", "collaboration")]),
+    ("Demo Sofia", "CSE 240 student who likes debugging C", [("enrolled_in", "course", "CSE 240"), ("working_on", "topic", "CSE 240 Project 1"),
+                    ("can_help_with", "topic", "pointers"), ("open_to", "activity", "study")]),
+    ("Demo Wei", "CS junior, tutors recursion", [("enrolled_in", "course", "CSE 240"), ("enrolled_in", "course", "MAT 243"),
                   ("can_help_with", "topic", "recursion"), ("open_to", "activity", "study")]),
-    ("Demo Aisha", [("attending", "event", "Adobe University Hackathon"), ("interested_in", "topic", "design"),
-                    ("open_to", "activity", "teammates")]),
-    ("Demo Leo", [("enrolled_in", "course", "CSE 110"), ("working_on", "topic", "AI project"),
-                  ("interested_in", "topic", "speech recognition"), ("open_to", "activity", "study")]),
+    ("Demo Aisha", "Product designer, Figma and UX research", [("attending", "event", "Adobe University Hackathon"), ("interested_in", "topic", "design"),
+                    ("can_help_with", "topic", "UX research"), ("open_to", "activity", "teammates")]),
+    ("Demo Leo", "Speech recognition research assistant", [("enrolled_in", "course", "CSE 110"), ("working_on", "topic", "AI project"),
+                  ("interested_in", "topic", "speech recognition"), ("experienced_in", "topic", "machine learning"), ("open_to", "activity", "collaboration")]),
+    ("Demo Nina", "Pre-med building a health app", [("working_on", "topic", "healthcare app"), ("looking_for", "topic", "technical cofounder"),
+                   ("interested_in", "topic", "startups"), ("open_to", "activity", "collaboration")]),
+    ("Demo Omar", "ASU alum, product manager at a fintech startup", [("experienced_in", "topic", "product management"), ("can_help_with", "topic", "APM interviews"),
+                   ("interested_in", "topic", "startups"), ("open_to", "activity", "mentoring"), ("open_to", "activity", "advising")]),
+    ("Demo Grace", "Runs the ASU AI club", [("interested_in", "topic", "machine learning"), ("attending", "event", "Cubbie Hackathon"),
+                    ("can_help_with", "topic", "pitch decks"), ("open_to", "activity", "buddies")]),
+    ("Demo Diego", "Looking for gym and study buddies", [("enrolled_in", "course", "MAT 243"), ("interested_in", "topic", "fitness"),
+                    ("looking_for", "topic", "study group"), ("open_to", "activity", "study"), ("open_to", "activity", "buddies")]),
 ]
 
 
@@ -63,14 +71,17 @@ def run(name: str, *args: str) -> str:
     return out
 
 
-def context_for(name: str, sigs: list[tuple[str, str, str]]) -> Path:
+def context_for(name: str, headline: str, sigs: list[tuple[str, str, str]]) -> Path:
     first = name.split()[1]
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     ctx = {
         "tz": TZ,
-        "policy": {"first_name": name, "school": "ASU", "contact": f"demo-{first.lower()}@supercub.test"},
+        "policy": {"first_name": name, "school": "ASU", "contact": f"demo-{first.lower()}@supercub.test",
+                   "participating": True, "intro": "automatic", "discoverable": "school", "share_events": True,
+                   "share_intro_profile": True, "intro_profile": {"name": name, "headline": headline}},
         "signals": [
-            {"type": t, "entity": {"kind": k, "key": label, "label": label}, "source": "student", "observed_at": now}
+            {"type": t, "entity": {"kind": k, "key": label, "label": label}, "source": "student", "observed_at": now,
+             **({"confirmed_at": now} if t in ("looking_for", "can_help_with", "open_to") else {})}
             for t, k, label in sigs
         ],
         "free": free_windows(),
@@ -84,16 +95,16 @@ def context_for(name: str, sigs: list[tuple[str, str, str]]) -> Path:
 
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "seed"
-    for name, sigs in DEMO:
+    for name, headline, sigs in DEMO:
         print(f"## {name}")
         if cmd == "seed":
-            print(run(name, "policy", "--participating", "yes", "--discoverable", "network", "--share-events", "yes"))
-            print(run(name, "sync", "--file", str(context_for(name, sigs))))
+            approved = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            print(run(name, "setup", "--file", str(context_for(name, headline, sigs)), "--approved-at", approved))
         elif cmd == "sync":
-            print(run(name, "sync", "--file", str(context_for(name, sigs))))
+            print(run(name, "sync", "--file", str(context_for(name, headline, sigs))))
         elif cmd == "answer":
             ans = sys.argv[2] if len(sys.argv) > 2 else "yes"
-            out = run(name, "sync", "--file", str(context_for(name, sigs)))
+            out = run(name, "sync", "--file", str(context_for(name, headline, sigs)))
             print(out)
             if out.startswith("ASK "):
                 sid = out.split()[1]

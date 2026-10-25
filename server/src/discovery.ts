@@ -390,14 +390,7 @@ export function guardText(raw: unknown, a: StudentContext, b: StudentContext, no
   for (const name of names(a, b)) {
     if (new RegExp(`(^|[^\\p{L}])${escapeRegExp(name)}($|[^\\p{L}])`, "iu").test(text)) return null;
   }
-  const shared = sharedKeys(a, b, now);
-  const normalized = words(text);
-  const compact = normalized.replace(/ /g, "");
-  for (const s of [...fresh(a, now), ...fresh(b, now)]) {
-    if (shared.has(s.entity.key)) continue;
-    if (normalized.includes(words(s.entity.label))) return null;
-    if (s.entity.kind === "course" && s.entity.key.length >= 4 && compact.includes(s.entity.key)) return null;
-  }
+  // Labels from either person's approved signals may appear: the reason can be complementary, not only shared.
   return text;
 }
 

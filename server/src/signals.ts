@@ -98,7 +98,9 @@ export function consentScopeMatches(consent: AutomaticIntroConsent, policy: Poli
 
 export function standingConsent(policy: Policy, activity: Activity, now: Date): AutomaticIntroConsent | null {
   const consent = policy.automatic_intro_consent;
-  if (policy.intro !== "automatic" || !policy.participating || !consent || !consentScopeMatches(consent, policy) || !consent.activities.includes(activity)) return null;
+  // Joining with automatic introductions covers any reason the judge finds, not only the listed activities.
+  void activity;
+  if (policy.intro !== "automatic" || !policy.participating || !consent || !consentScopeMatches(consent, policy)) return null;
   const at = Date.parse(consent.approved_at);
   return Number.isFinite(at) && at <= now.getTime() + 300_000 && now.getTime() < at + 365 * 86400_000 ? consent : null;
 }

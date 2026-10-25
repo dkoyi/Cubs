@@ -5,7 +5,7 @@
 //   participants         set of student ids with participating = true
 //   sugg:{id}            a suggestion between two students (JSON), holding both sides' answers
 //   suggs:{sid}          set of suggestion ids the student is part of
-//   spair:{lo}:{hi}      present while a pair is cooling down (30 days from a suggestion or a "no")
+//   spair:{lo}:{hi}      present while a pair is cooling down (1 hour; sreason keys block the same reason for a day)
 
 import { randomUUID } from "node:crypto";
 import {
@@ -42,12 +42,22 @@ const HOUR_MS = 3_600_000;
 const CONTEXT_TTL_SECONDS = 120 * DAY_SECONDS;
 /** Suggestions are kept a little past the 30-day pair cooldown, so the weekly cap and cooldown can be read from them. */
 const SUGGESTION_TTL_SECONDS = 31 * DAY_SECONDS;
-const COOLDOWN_SECONDS = 30 * DAY_SECONDS;
+/** A pair can be introduced again after this, but only for a different reason. */
+const COOLDOWN_SECONDS = 3600;
+/** The same reason for the same pair is not suggested again for this long. */
+const SAME_REASON_SECONDS = DAY_SECONDS;
 /** A pair the model judged not worth it is not sent to the model again for this long. Caps judge calls per pair. */
-const LOW_WORTH_COOLDOWN_SECONDS = 6 * 3600;
+const LOW_WORTH_COOLDOWN_SECONDS = 3600;
 const ASK_HOURS = 48;
 const LATER_HOURS = 24;
-const WEEK_MS = 7 * 24 * HOUR_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Suggestions per person per day, set server-wide; a person's own cap of 0 still means none. */
+export function maxPerDay(): number {
+  const raw = process.env.SUPERCUB_MAX_PER_DAY;
+  const n = raw === undefined ? 5 : Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 50 ? n : 5;
+}
 
 const k = {
   ctx: (sid: string) => `ctx:${sid}`,
@@ -56,6 +66,7 @@ const k = {
   sugg: (id: string) => `sugg:${id}`,
   suggs: (sid: string) => `suggs:${sid}`,
   pair: (a: string, b: string) => (a < b ? `spair:${a}:${b}` : `spair:${b}:${a}`),
+  reason: (a: string, b: string, sig: string) => (a < b ? `sreason:${a}:${b}:${sig}` : `sreason:${b}:${a}:${sig}`),
 };
 
 function parseJson<T>(raw: string | null): T | null {
@@ -285,10 +296,11 @@ export async function hasOpenSuggestion(store: Store, sid: string, now: Date): P
   return (await listSuggestions(store, sid, now)).some(isOpen);
 }
 
-async function underWeeklyCap(store: Store, ctx: StudentContext, now: Date): Promise<boolean> {
-  const since = now.getTime() - WEEK_MS;
+async function underDailyCap(store: Store, ctx: StudentContext, now: Date): Promise<boolean> {
+  if (ctx.policy.max_suggestions_per_week === 0) return false;
+  const since = now.getTime() - DAY_MS;
   const recent = (await listSuggestions(store, ctx.student_id, now)).filter((s) => Date.parse(s.created_at) > since);
-  return recent.length < ctx.policy.max_suggestions_per_week;
+  return recent.length < maxPerDay();
 }
 
 // ---------- discovery ----------
@@ -306,7 +318,7 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
   const me = await getContext(store, sid);
   if (me === null || !me.policy.participating) return null;
   if (await hasOpenSuggestion(store, sid, now)) return null;
-  if (!(await underWeeklyCap(store, me, now))) return null;
+  if (!(await underDailyCap(store, me, now))) return null;
 
   const candidates: Candidate[] = [];
   for (const otherId of await store.smembers(k.participants)) {
@@ -317,24 +329,23 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
       continue;
     }
     if (!other.policy.participating || !discoverableTo(me, other, now)) continue;
-    if (suggestionKind(me, other, now) === null) continue;
-    if (sharedKeys(me, other, now).size === 0) continue;
     const prefilter = prefilterScore(me, other, now);
-    if (prefilter < PREFILTER_MIN) continue;
+    // With a model judge, any reason it finds counts; the rules fallback still needs a concrete overlap.
+    if (judge === null && (suggestionKind(me, other, now) === null || sharedKeys(me, other, now).size === 0 || prefilter < PREFILTER_MIN)) continue;
     if ((await store.get(k.pair(sid, otherId))) !== null) continue;
     if (await hasOpenSuggestion(store, otherId, now)) continue;
-    if (!(await underWeeklyCap(store, other, now))) continue;
+    if (!(await underDailyCap(store, other, now))) continue;
     candidates.push({ other, prefilter });
   }
   candidates.sort((x, y) => y.prefilter - x.prefilter || x.other.updated_at.localeCompare(y.other.updated_at));
 
   for (const { other, prefilter } of candidates.slice(0, CANDIDATES_PER_STUDENT)) {
-    const kind = suggestionKind(me, other, now);
-    if (kind === null) continue;
+    const kind = suggestionKind(me, other, now) ?? "collaboration";
     const evidence = connectionEvidence(me, other, now);
     const signature = connectionSignature(sid, other.student_id, evidence, kind);
     const previous = await relationshipFor(store, sid, other.student_id);
     if (!mayReconnect(previous, signature)) continue;
+    if ((await store.get(k.reason(sid, other.student_id, signature))) !== null) continue;
     const shared = sharedSignals(me, other, now);
     let textA = rulesText(me, other, now);
     let textB = rulesText(other, me, now);
@@ -376,6 +387,7 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
     const id = randomUUID();
     // Claiming the pair key first keeps two concurrent syncs from creating the same pair twice.
     if (!(await store.setIfAbsent(k.pair(sid, other.student_id), id, COOLDOWN_SECONDS))) continue;
+    await store.set(k.reason(sid, other.student_id, signature), id, SAME_REASON_SECONDS);
     const suggestion: Suggestion = {
       id,
       a: sid,
@@ -455,7 +467,8 @@ async function stillPermitted(store: Store, s: Suggestion, now: Date): Promise<b
   const a = await getContext(store, s.a);
   const b = await getContext(store, s.b);
   return a !== null && b !== null && a.policy.participating && b.policy.participating &&
-    discoverableTo(a, b, now) && sharedActivities(a, b, now).includes(s.kind) && prefilterScore(a, b, now) >= PREFILTER_MIN;
+    discoverableTo(a, b, now) &&
+    (s.texts_from === "model" || (sharedActivities(a, b, now).includes(s.kind) && prefilterScore(a, b, now) >= PREFILTER_MIN));
 }
 
 /** Keep stored/model-written reasons anonymous; compose identity only at read time. */
@@ -474,7 +487,7 @@ async function askView(store: Store, s: Suggestion, sid: string, now: Date): Pro
   // Inserting the approved display name after the model guard avoids model-invented identities.
   const named = /\bsomeone\b/i.test(reason) ? reason.replace(/\bsomeone\b/i, () => profile.name) : `${profile.name}: ${reason}`;
   const question = (s.reconnecting ? "You've connected before. " : "") + (side.answer === "yes" ? "You've said yes. I'll let you know when they answer." :
-    otherStanding ? "They've opted into automatic introductions. Want the intro?" : otherSide.answer === "yes" ? "They've already said yes. Want the intro?" : "Want an intro?");
+    otherSide.answer === "yes" || otherStanding ? "They're up for it. Want the intro?" : "Want an intro?");
   const budget = 399 - question.length;
   const body = named.length <= budget ? named : `${named.slice(0, budget - 3).trimEnd()}...`;
   return { ...view, text: `${body} ${question}`, profile, other_accepted: otherSide.answer === "yes" || otherStanding, you_accepted: side.answer === "yes",
@@ -503,7 +516,7 @@ async function agreedView(store: Store, s: Suggestion, sid: string): Promise<Agr
   const mine = sideOf(s, sid);
   const ownStanding = Boolean((mine === "a" ? s.side_a : s.side_b).standing_consent);
   const otherStanding = Boolean((mine === "a" ? s.side_b : s.side_a).standing_consent);
-  const head = ownStanding || otherStanding ? `You're connected with ${other.first_name}. ${otherStanding ? "They approved automatic introductions" : "They accepted this introduction"}.` : `You're on. ${other.first_name} said yes too.`;
+  let head = ownStanding || otherStanding ? `Meet ${other.first_name}.` : `You're on. ${other.first_name} said yes too.`;
   const view: AgreedView = { id: s.id, first_name: other.first_name, contact: other.contact, when: null, text: "" };
   if (ownStanding || otherStanding) {
     view.consent = { you: ownStanding ? "standing" : "explicit", other: otherStanding ? "standing" : "explicit" };
@@ -513,8 +526,9 @@ async function agreedView(store: Store, s: Suggestion, sid: string): Promise<Agr
       .replace(/\s*Want me to see if you'd both like to connect\?$/i, "")
       .replace(/\s*[^.?!]*\?$/, "");
     view.reason = rawReason.replace(/\bsomeone\b/i, () => view.profile?.name ?? other.first_name).slice(0, 350);
+    if (view.reason) head = `Meet ${other.first_name}. ${view.reason.replace(/[.!]?$/, ".")}`;
   }
-  if (s.when === null) return { ...view, text: `${head} Pick a time that works for you both.` };
+  if (s.when === null) return { ...view, text: ownStanding || otherStanding ? head : `${head} Pick a time that works for you both.` };
   const ctx = await getContext(store, sid);
   const offset = (ctx?.tz === undefined ? null : zoneOffsetMinutes(ctx.tz, new Date(s.when.start))) ?? 0;
   return {
@@ -716,7 +730,7 @@ export async function deleteLoopData(store: Store, sid: string): Promise<void> {
     if (s !== null) {
       const otherId = s.a === sid ? s.b : s.a;
       await store.srem(k.suggs(otherId), id);
-      await store.del([k.pair(s.a, s.b)]);
+      await store.del([k.pair(s.a, s.b), ...(s.connection_signature ? [k.reason(s.a, s.b, s.connection_signature)] : [])]);
     }
     await store.del([k.sugg(id)]);
   }

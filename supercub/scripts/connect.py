@@ -1164,8 +1164,9 @@ def _agreed_lines(item: JsonDict, tz: tzinfo) -> list[str]:
     ]
     if isinstance(item.get("when"), dict):
         lines.append(f"Calendar times: {iso_range(item['when'], tz)}")
-    if clean(item.get("reason"), 350):
-        lines.append(f"Connection reason: {clean(item.get('reason'), 350)}")
+    reason = clean(item.get("reason"), 350)
+    if reason and reason.rstrip(".") not in lines[1]:
+        lines.append(f"Connection reason: {reason}")
     raw_profile = item.get("profile")
     if isinstance(raw_profile, dict):
         try:
