@@ -65,8 +65,14 @@ export const DEFAULT_POLICY: Omit<Policy, "first_name"> = {
   intro: "ask",
   share_events: false,
   share_applications: false,
-  max_suggestions_per_week: 1,
+  max_suggestions_per_week: defaultPerWeek(),
 };
+
+function defaultPerWeek(): number {
+  const raw = process.env.SUPERCUB_MAX_PER_WEEK;
+  const n = raw === undefined ? 3 : Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 7 ? n : 3;
+}
 
 export const CONTEXT_LIMITS = {
   signalsPerCall: 60,
