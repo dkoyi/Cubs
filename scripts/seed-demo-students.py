@@ -30,9 +30,9 @@ OFFSET = timezone(timedelta(hours=-7))
 # Overlaps are chosen to touch the three real accounts seen tonight:
 # Cubbie Hackathon + AI project (Apoorv), CSE 240 (Malaika), CSE 240 Project 1 / Adobe hackathon (Dhanush).
 DEMO = [
-    ("Demo Priya", "Building a voice AI study helper", [("attending", "event", "Cubbie Hackathon"), ("working_on", "topic", "AI project"),
+    ("Demo Priya", "Building a voice AI study helper", [("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"), ("working_on", "topic", "AI project"),
                     ("interested_in", "topic", "voice AI"), ("looking_for", "topic", "frontend help"), ("open_to", "activity", "teammates")]),
-    ("Demo Marcus", "Frontend dev, React and design systems", [("attending", "event", "Cubbie Hackathon"), ("interested_in", "topic", "frontend design"),
+    ("Demo Marcus", "Frontend dev, React and design systems", [("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"), ("interested_in", "topic", "frontend design"),
                      ("can_help_with", "topic", "React"), ("open_to", "activity", "teammates"), ("open_to", "activity", "collaboration")]),
     ("Demo Sofia", "CSE 240 student who likes debugging C", [("enrolled_in", "course", "CSE 240"), ("working_on", "topic", "CSE 240 Project 1"),
                     ("can_help_with", "topic", "pointers"), ("open_to", "activity", "study")]),
@@ -40,13 +40,13 @@ DEMO = [
                   ("can_help_with", "topic", "recursion"), ("open_to", "activity", "study")]),
     ("Demo Aisha", "Product designer, Figma and UX research", [("attending", "event", "Adobe University Hackathon"), ("interested_in", "topic", "design"),
                     ("can_help_with", "topic", "UX research"), ("open_to", "activity", "teammates")]),
-    ("Demo Leo", "Speech recognition research assistant", [("enrolled_in", "course", "CSE 110"), ("working_on", "topic", "AI project"),
+    ("Demo Leo", "Speech recognition research assistant", [("enrolled_in", "course", "CSE 110"), ("attending", "event", "DevHacks"), ("working_on", "topic", "AI project"),
                   ("interested_in", "topic", "speech recognition"), ("experienced_in", "topic", "machine learning"), ("open_to", "activity", "collaboration")]),
     ("Demo Nina", "Pre-med building a health app", [("working_on", "topic", "healthcare app"), ("looking_for", "topic", "technical cofounder"),
                    ("interested_in", "topic", "startups"), ("open_to", "activity", "collaboration")]),
     ("Demo Omar", "ASU alum, product manager at a fintech startup", [("experienced_in", "topic", "product management"), ("can_help_with", "topic", "APM interviews"),
                    ("interested_in", "topic", "startups"), ("open_to", "activity", "mentoring"), ("open_to", "activity", "advising")]),
-    ("Demo Grace", "Runs the ASU AI club", [("interested_in", "topic", "machine learning"), ("attending", "event", "Cubbie Hackathon"),
+    ("Demo Grace", "Runs the ASU AI club", [("interested_in", "topic", "machine learning"), ("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"),
                     ("can_help_with", "topic", "pitch decks"), ("open_to", "activity", "buddies")]),
     ("Demo Diego", "Looking for gym and study buddies", [("enrolled_in", "course", "MAT 243"), ("interested_in", "topic", "fitness"),
                     ("looking_for", "topic", "study group"), ("open_to", "activity", "study"), ("open_to", "activity", "buddies")]),

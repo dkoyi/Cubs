@@ -157,7 +157,7 @@ export function normalizeEntityKey(kind: EntityKind, label: string): string {
     .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ")
     .trim();
-  return kind === "course" ? words.replace(/ /g, "") : words;
+  return kind === "course" || kind === "event" ? words.replace(/ /g, "") : words;
 }
 
 /** Collapses whitespace in free text. */
@@ -201,7 +201,7 @@ const FINE_LOCATION = [
 ];
 /** Words that make a calendar or email event look public, like a hackathon or a career fair. */
 const PUBLIC_EVENT_WORDS =
-  /\b(hackathon|career fair|fair|club|talk|workshop|meetup|conference|seminar|info session|symposium|expo|festival|panel|game|tournament|showcase|lecture series|networking|summit)\b/i;
+  /\b(\w*hackathon|\w*hacks?|career fair|fair|club|talk|workshop|meetup|conference|seminar|info session|symposium|expo|festival|panel|game|tournament|showcase|lecture series|networking|summit)\b/i;
 
 /** Returns a reason when a piece of free text must never be stored, or null when it is fine. */
 function forbiddenText(text: string): string | null {

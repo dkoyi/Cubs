@@ -1260,6 +1260,10 @@ def cmd_sync(args: argparse.Namespace) -> list[str]:
         sid, text = clean(ask.get("id"), 60), clean(ask.get("text"), 400)
         if sid and text and sid not in seen:
             lines = _ask_lines(ask)
+    for event in _dicts(result.get("events"))[:5]:
+        label, others = clean(event.get("label"), 60), event.get("others")
+        if label and isinstance(others, int) and others > 0:
+            lines.append(f"Also going to {label}: {others} other{'s' if others != 1 else ''} on Super Cub.")
     save_state(state)
     return lines
 

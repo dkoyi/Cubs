@@ -15,7 +15,7 @@ import {
 } from "./service.js";
 import type { MatchView, RequestView } from "./service.js";
 import type { Judge } from "./judge.js";
-import { acknowledgeDelivery, answerSuggestion, deleteLoopData, discoverAll, getContext, hasOpenSuggestion, pendingFor, previewSuggestion, putContext, runDiscovery } from "./loop.js";
+import { acknowledgeDelivery, answerSuggestion, deleteLoopData, discoverAll, getContext, hasOpenSuggestion, pendingFor, previewSuggestion, putContext, runDiscovery, eventCounts } from "./loop.js";
 import type { AnswerValue } from "./loop.js";
 import type { Store } from "./store.js";
 import { isRecord, isToken, isUuid, parseJoin, parseRespond } from "./validate.js";
@@ -170,7 +170,7 @@ export function handlePutContext(request: Request, deps: Deps): Promise<Response
     const outcome = await putContext(deps.store, sid, body, now);
     if (!outcome.ok) return error(outcome.error.startsWith("CONTEXT CONFLICT.") ? 409 : 400, outcome.error);
     await runDiscovery(deps.store, sid, now, deps.judge ?? null);
-    return json(200, { ...outcome.value, open_suggestion: await hasOpenSuggestion(deps.store, sid, now),
+    return json(200, { ...outcome.value, open_suggestion: await hasOpenSuggestion(deps.store, sid, now), events: await eventCounts(deps.store, sid, now),
       ...(isRecord(body) && body.client_release ? { skill_release: SKILL_RELEASE, intro_mode: (await getContext(deps.store, sid))?.policy.intro } : {}) });
   });
 }

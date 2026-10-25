@@ -305,6 +305,9 @@ async function underDailyCap(store: Store, ctx: StudentContext, now: Date): Prom
 
 // ---------- discovery ----------
 
+const lowWorthMark = (a: StudentContext, b: StudentContext): string =>
+  a.student_id < b.student_id ? `low_worth:${a.updated_at}|${b.updated_at}` : `low_worth:${b.updated_at}|${a.updated_at}`;
+
 interface Candidate {
   other: StudentContext;
   prefilter: number;
@@ -332,7 +335,12 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
     const prefilter = prefilterScore(me, other, now);
     // With a model judge, any reason it finds counts; the rules fallback still needs a concrete overlap.
     if (judge === null && (suggestionKind(me, other, now) === null || sharedKeys(me, other, now).size === 0 || prefilter < PREFILTER_MIN)) continue;
-    if ((await store.get(k.pair(sid, otherId))) !== null) continue;
+    const held = await store.get(k.pair(sid, otherId));
+    if (held !== null) {
+      // A "not worth it" verdict only holds while neither person's context has changed.
+      if (!held.startsWith("low_worth") || held === lowWorthMark(me, other)) continue;
+      await store.del([k.pair(sid, otherId)]);
+    }
     if (await hasOpenSuggestion(store, otherId, now)) continue;
     if (!(await underDailyCap(store, other, now))) continue;
     candidates.push({ other, prefilter });
@@ -364,7 +372,7 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
       why = guardWhy(verdict.why, me, other);
       if (verdict.worth < JUDGE_THRESHOLD) {
         console.log(`judge: ${judgeName} worth ${verdict.worth.toFixed(2)} below ${JUDGE_THRESHOLD}, skipped`);
-        await store.setIfAbsent(k.pair(sid, other.student_id), "low_worth", LOW_WORTH_COOLDOWN_SECONDS);
+        await store.set(k.pair(sid, other.student_id), lowWorthMark(me, other), LOW_WORTH_COOLDOWN_SECONDS);
         continue;
       }
       const guardedA = guardText(verdict.text_for_a, me, other, now);
@@ -422,6 +430,23 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
     return await finishWithConsent(store, suggestion, now) ?? suggestion;
   }
   return null;
+}
+
+/** For each event the caller is attending, how many other people they could be introduced to are going too. */
+export async function eventCounts(store: Store, sid: string, now: Date): Promise<Array<{ label: string; others: number }>> {
+  const me = await getContext(store, sid);
+  if (me === null || !me.policy.participating || !me.policy.share_events) return [];
+  const mine = me.signals.filter((s) => s.type === "attending" && isFresh(s, now));
+  if (mine.length === 0) return [];
+  const counts = new Map(mine.map((s) => [s.entity.key, 0]));
+  for (const otherId of await store.smembers(k.participants)) {
+    if (otherId === sid) continue;
+    const other = await getContext(store, otherId);
+    if (other === null || !other.policy.participating || !other.policy.share_events || !discoverableTo(me, other, now)) continue;
+    const keys = new Set(other.signals.filter((s) => s.type === "attending" && isFresh(s, now)).map((s) => s.entity.key));
+    for (const key of counts.keys()) if (keys.has(key)) counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return mine.map((s) => ({ label: s.entity.label, others: counts.get(s.entity.key) ?? 0 })).filter((e) => e.others > 0).slice(0, 5);
 }
 
 /** Runs discovery for every participating student. For the optional cron. */

@@ -183,6 +183,10 @@ Offer setup once and remember the approved scope, contact and activities. Instal
 
 To change an answer later, update only that flag using `policy`, refresh the full context snapshot and sync so the server applies it. For "no meals" or a retracted help offer, remove the corresponding signal from the next snapshot; never keep sending a revoked preference from memory. For stop, run `policy --participating no`, then `sync` (no context file is needed), and cancel the sync check-in after successful revocation. Explain a failure and retry later; do not claim the server has stopped until it responds. Direct requests require `leave` to remove.
 
+### Instant sync: new context in the conversation
+
+When the person tells you, or you read in an email/message you were asked to look at or a connected source, something new that could connect them (an event like "going to DevHacks", a project, a request, an offer), confirm it in one short line, for example: "Sounds like you're going to DevHacks. Want me to see who else is going?" On yes, add the signal (`attending` with `when` if known; `working_on`, `looking_for` or `can_help_with` otherwise, with `confirmed_at` now), write the full snapshot and run `sync` immediately, in the same turn. Do not wait for a check-in. Relay in one reply: the `Also going to ...` line if present ("4 others on Super Cub are going too"), then any `AGREED` introduction as in step 4 below. Never upload the email/message itself, only the confirmed signal.
+
 ### Each sync
 
 1. Gather, with your own abilities, and turn what you find into typed signals, in this order. Skip unavailable sources; never invent missing context. During scheduled runs use approved available data and do not prompt for missing free times. Set `source` to where each one came from: canvas, calendar, email, memory or student.
