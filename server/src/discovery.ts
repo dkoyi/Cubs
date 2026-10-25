@@ -76,16 +76,68 @@ export function discoverableTo(a: StudentContext, b: StudentContext, now: Date):
 
 // ---------- shared signals and score ----------
 
-/** "type:key" for every signal both students have with the same type and key, sorted. */
-export function sharedSignals(a: StudentContext, b: StudentContext, now: Date): string[] {
-  const theirs = new Set(fresh(b, now).map(signalId));
-  return [...new Set(fresh(a, now).map(signalId))].filter((id) => theirs.has(id)).sort();
+/** One student is enrolled in a course whose code starts or appears in the other's working_on label. */
+interface CourseLink {
+  /** The enrolled student's enrolled_in signal. */
+  course: Signal;
+  /** The other student's working_on signal, like "CSE 240 Project 1". */
+  work: Signal;
+  /** Which side of the (a, b) pair holds the course. */
+  enrolled: "a" | "b";
 }
 
-/** Entity keys present in both students' signals, whatever the signal type. */
+/** True when the course code ("cse240") is a run of whole words in the label key or a prefix of it. */
+function courseCodeIn(code: string, work: Signal["entity"]): boolean {
+  if (code.length < 4) return false;
+  const tokens = work.key.split(" ");
+  for (let i = 0; i < tokens.length; i += 1) {
+    let joined = "";
+    for (let j = i; j < tokens.length && joined.length < code.length; j += 1) {
+      joined += tokens[j] ?? "";
+      if (joined === code) return true;
+    }
+  }
+  // Course-kind keys have no spaces ("cse240project1"): a prefix counts unless it runs into more digits.
+  const compact = work.key.replace(/ /g, "");
+  return compact.startsWith(code) && !/^\d/.test(compact.slice(code.length));
+}
+
+function linksFrom(enrolled: Signal[], working: Signal[], side: "a" | "b"): CourseLink[] {
+  const out: CourseLink[] = [];
+  for (const course of enrolled) {
+    if (course.type !== "enrolled_in") continue;
+    for (const work of working) {
+      if (work.type === "working_on" && courseCodeIn(course.entity.key, work.entity)) {
+        out.push({ course, work, enrolled: side });
+      }
+    }
+  }
+  return out;
+}
+
+/** Course-to-assignment links in both directions. A link counts as the course being shared. */
+function courseLinks(sa: Signal[], sb: Signal[]): CourseLink[] {
+  return [...linksFrom(sa, sb, "a"), ...linksFrom(sb, sa, "b")];
+}
+
+/** "type:key" for every signal both students have with the same type and key, plus linked courses, sorted. */
+export function sharedSignals(a: StudentContext, b: StudentContext, now: Date): string[] {
+  const sa = fresh(a, now);
+  const sb = fresh(b, now);
+  const theirs = new Set(sb.map(signalId));
+  const ids = new Set(sa.map(signalId).filter((id) => theirs.has(id)));
+  for (const link of courseLinks(sa, sb)) ids.add(signalId(link.course));
+  return [...ids].sort();
+}
+
+/** Entity keys present in both students' signals, whatever the signal type, plus linked course keys. */
 export function sharedKeys(a: StudentContext, b: StudentContext, now: Date): Set<string> {
-  const theirs = new Set(fresh(b, now).map((s) => s.entity.key));
-  return new Set(fresh(a, now).map((s) => s.entity.key).filter((k) => theirs.has(k)));
+  const sa = fresh(a, now);
+  const sb = fresh(b, now);
+  const theirs = new Set(sb.map((s) => s.entity.key));
+  const keys = new Set(sa.map((s) => s.entity.key).filter((k) => theirs.has(k)));
+  for (const link of courseLinks(sa, sb)) keys.add(link.course.entity.key);
+  return keys;
 }
 
 const NEEDS: readonly SignalType[] = ["working_on", "interested_in"];
@@ -117,22 +169,27 @@ export function freeOverlap(a: TimeWindow[], b: TimeWindow[], now: Date): TimeWi
   return meeting;
 }
 
-/** The rules prefilter, 0 to 1. */
+/**
+ * The rules prefilter, 0 to 1. Signals from memory usually carry no due or when, so a shared
+ * working_on or event counts on its own and dates only add a bonus.
+ */
 export function prefilterScore(a: StudentContext, b: StudentContext, now: Date): number {
   const sa = fresh(a, now);
   const sb = fresh(b, now);
+  const links = courseLinks(sa, sb);
   let score = 0;
-  if (sharedSignalsOf(sa, sb, "enrolled_in").length > 0) score += 0.3;
-  const assignments = sharedSignalsOf(sa, sb, "working_on").filter(
-    ([x, y]) => x.entity.kind === "assignment" && (within(x.due, now, 7) || within(y.due, now, 7)),
-  );
-  if (assignments.length > 0) score += 0.3;
-  const events = sharedSignalsOf(sa, sb, "attending").filter(
-    ([x, y]) => within(x.when, now, 14) || within(y.when, now, 14),
-  );
+  // A course-to-assignment link counts as the course being shared, and earns its own bonus too.
+  if (sharedSignalsOf(sa, sb, "enrolled_in").length > 0 || links.length > 0) score += 0.3;
+  if (links.length > 0) score += 0.3;
+  const work = sharedSignalsOf(sa, sb, "working_on");
+  if (work.length > 0) score += 0.5;
+  if (work.some(([x, y]) => within(x.due, now, 7) && within(y.due, now, 7))) score += 0.1;
+  const events = sharedSignalsOf(sa, sb, "attending");
   if (events.length > 0) score += 0.3;
+  if (events.some(([x, y]) => within(x.when, now, 14) || within(y.when, now, 14))) score += 0.1;
+  if (sharedSignalsOf(sa, sb, "interested_in").length > 0) score += 0.2;
   if (helpKeys(sa, sb).length > 0 || helpKeys(sb, sa).length > 0) score += 0.3;
-  if (sharedActivities(a, b, now).length > 0) score += 0.2;
+  if (sharedActivities(a, b, now).length > 0) score += 0.15;
   if (freeOverlap(a.free, b.free, now) !== null) score += 0.1;
   return Math.min(1, Math.round(score * 100) / 100);
 }
@@ -146,7 +203,11 @@ export function suggestionKind(a: StudentContext, b: StudentContext, now: Date):
   const sa = fresh(a, now);
   const sb = fresh(b, now);
   if (helpKeys(sa, sb).length > 0 || helpKeys(sb, sa).length > 0) return "mentoring";
-  if (sharedSignalsOf(sa, sb, "enrolled_in").length > 0 || sharedSignalsOf(sa, sb, "working_on").length > 0) {
+  if (
+    sharedSignalsOf(sa, sb, "enrolled_in").length > 0 ||
+    sharedSignalsOf(sa, sb, "working_on").length > 0 ||
+    courseLinks(sa, sb).length > 0
+  ) {
     return "study";
   }
   if (sharedSignalsOf(sa, sb, "attending").length > 0) return "teammates";
@@ -178,10 +239,16 @@ export function rulesText(me: StudentContext, other: StudentContext, now: Date):
   const label = (key: string): string => mine.find((s) => s.entity.key === key)?.entity.label ?? key;
 
   const courses = sharedSignalsOf(mine, theirs, "enrolled_in").map(([x]) => x.entity.label);
+  const links = courseLinks(mine, theirs);
+  // The reader is enrolled and the other works on something for that course, or the other way round.
+  const myLinked = links.find((l) => l.enrolled === "a")?.course.entity.label;
+  const theirLinked = links.find((l) => l.enrolled === "b")?.course.entity.label;
   const events = sharedSignalsOf(mine, theirs, "attending").map(([x]) => x.entity.label);
   let start: string;
   let usedEvent = false;
-  if (courses[0] !== undefined) start = `Someone in your ${courses[0]} class`;
+  const myCourse = courses[0] ?? myLinked;
+  if (myCourse !== undefined) start = `Someone in your ${myCourse} class`;
+  else if (theirLinked !== undefined) start = `Someone taking ${theirLinked}`;
   else if (events[0] !== undefined) {
     start = `Someone going to ${events[0]}`;
     usedEvent = true;
@@ -219,6 +286,8 @@ export interface JudgeSignal {
  * Signals of the types both students have shared, limited to entities both students have.
  * Labels only: no details, names or contacts. The model never sees an entity only one student has,
  * so it cannot paraphrase one past guardText, and a crafted label reaches it only if both students sent it.
+ * A course-to-assignment link shows up as the course on both sides (never the assignment title):
+ * enrolled_in on the enrolled side, working_on with the course label on the other.
  */
 export function mutualSignals(a: StudentContext, b: StudentContext, now: Date): [JudgeSignal[], JudgeSignal[]] {
   const sa = fresh(a, now);
@@ -230,7 +299,17 @@ export function mutualSignals(a: StudentContext, b: StudentContext, now: Date): 
     list
       .filter((s) => types.has(s.type) && keys.has(s.entity.key))
       .map((s) => ({ type: s.type, kind: s.entity.kind, label: s.entity.label }));
-  return [view(sa), view(sb)];
+  const viewA = view(sa);
+  const viewB = view(sb);
+  const add = (list: JudgeSignal[], item: JudgeSignal): void => {
+    if (!list.some((x) => x.type === item.type && x.kind === item.kind && x.label === item.label)) list.push(item);
+  };
+  for (const { course, enrolled } of courseLinks(sa, sb)) {
+    const label = course.entity.label;
+    add(enrolled === "a" ? viewA : viewB, { type: "enrolled_in", kind: "course", label });
+    add(enrolled === "a" ? viewB : viewA, { type: "working_on", kind: "course", label });
+  }
+  return [viewA, viewB];
 }
 
 export const MAX_TEXT_CHARS = 400;

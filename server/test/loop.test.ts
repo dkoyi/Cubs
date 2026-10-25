@@ -146,7 +146,7 @@ describe("two-student loop", () => {
     const stored = await getSuggestion(store, id);
     expect(stored?.status).toBe("asked_both");
     expect(stored?.judge).toBe("rules");
-    expect(stored?.score).toBe(0.9);
+    expect(stored?.score).toBe(1);
     expect(stored?.why).toContain("judge: rules");
 
     // Unanswered asks are returned again before they expire.
@@ -539,6 +539,127 @@ describe("model judge (mocked)", () => {
     expect((await body<ContextBody>(await handlePutContext(put(b, jordanCtx), deps))).open_suggestion).toBe(true);
     const view = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(a), deps));
     expect((await getSuggestion(store, view.ask?.id ?? ""))?.judge).toBe("rules");
+  });
+});
+
+describe("undated memory signals (real cases from Oct 24 phones)", () => {
+  const memory = (type: string, kind: string, label: string) => ({ type, entity: { kind, label }, source: "memory" });
+  const enrolled = (label: string) => ({ type: "enrolled_in", entity: { kind: "course", label }, source: "canvas" });
+  const student = (firstName: string, signals: Array<Record<string, unknown>>) => ({
+    policy: { participating: true, discoverable: "school", school: "ASU", first_name: firstName, share_events: true },
+    signals,
+    tz: "America/Phoenix",
+  });
+  const studentA = student("Ana", [
+    memory("attending", "event", "Cubbie Hackathon"),
+    memory("interested_in", "topic", "Voice AI and speech recognition"),
+    memory("working_on", "topic", "AI project"),
+  ]);
+  const studentB = student("Ben", [
+    ...["CSE 230", "CSE 240", "MAT 243", "SES 141", "UNI 220"].map(enrolled),
+    memory("working_on", "topic", "AI project"),
+  ]);
+  const studentC = student("Cam", [
+    memory("attending", "event", "Adobe University Hackathon"),
+    ...["CIS 401", "CSE 110"].map(enrolled),
+    memory("working_on", "assignment", "CSE 240 Project 1"),
+  ]);
+
+  function mockJudge(reply: (req: JudgeRequest) => Judgment | null): Judge & { calls: JudgeRequest[] } {
+    const calls: JudgeRequest[] = [];
+    return {
+      name: "mock",
+      calls,
+      async judge(req) {
+        calls.push(req);
+        return reply(req);
+      },
+    };
+  }
+
+  it("A and B share an undated working_on and get a suggestion", async () => {
+    const text = "Someone at ASU is working on an AI project too. Want me to see if you'd both like to connect?";
+    const judge = mockJudge(() => ({ worth: 0.7, why: "Both on an AI project.", text_for_a: text, text_for_b: text }));
+    deps.judge = judge;
+    const a = newStudent();
+    const b = newStudent();
+    await handlePutContext(put(a, studentA), deps);
+    expect((await body<ContextBody>(await handlePutContext(put(b, studentB), deps))).open_suggestion).toBe(true);
+    expect(judge.calls).toHaveLength(1);
+    const req = judge.calls[0];
+    expect(req?.shared).toEqual(["working_on:ai project"]);
+    expect(req?.prefilter).toBe(0.5);
+    expect(req?.a).toEqual([{ type: "working_on", kind: "topic", label: "AI project" }]);
+    expect(req?.b).toEqual([{ type: "working_on", kind: "topic", label: "AI project" }]);
+    const view = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(a), deps));
+    expect(view.ask?.text).toBe(text);
+    expect((await getSuggestion(store, view.ask?.id ?? ""))?.texts_from).toBe("model");
+  });
+
+  it("B is enrolled in CSE 240 and C works on CSE 240 Project 1: the suggestion names the course", async () => {
+    const textB = "Someone in your CSE 240 class is on Super Cub too. Want me to see if you'd both like to connect?";
+    const textC = "Someone taking CSE 240 is on Super Cub too. Want me to see if you'd both like to connect?";
+    const judge = mockJudge((req) => ({
+      worth: 0.7,
+      why: "Same course.",
+      text_for_a: req.a.some((s) => s.type === "enrolled_in") ? textB : textC,
+      text_for_b: req.b.some((s) => s.type === "enrolled_in") ? textB : textC,
+    }));
+    deps.judge = judge;
+    const b = newStudent();
+    const c = newStudent();
+    await handlePutContext(put(b, studentB), deps);
+    expect((await body<ContextBody>(await handlePutContext(put(c, studentC), deps))).open_suggestion).toBe(true);
+    expect(judge.calls).toHaveLength(1);
+    const req = judge.calls[0];
+    expect(req?.shared).toEqual(["enrolled_in:cse240"]);
+    expect(req?.prefilter).toBe(0.6);
+    // C discovered B: C is side a. Both sides see the course, never the assignment title or other courses.
+    expect(req?.a).toEqual([{ type: "working_on", kind: "course", label: "CSE 240" }]);
+    expect(req?.b).toEqual([{ type: "enrolled_in", kind: "course", label: "CSE 240" }]);
+    expect(JSON.stringify(req)).not.toContain("Project 1");
+    expect(JSON.stringify(req)).not.toContain("CSE 230");
+
+    const viewB = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(b), deps));
+    const viewC = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(c), deps));
+    expect(viewB.ask?.text).toBe(textB);
+    expect(viewC.ask?.text).toBe(textC);
+    const stored = await getSuggestion(store, viewB.ask?.id ?? "");
+    expect(stored?.texts_from).toBe("model");
+    expect(stored?.kind).toBe("study");
+    expect(stored?.shared).toEqual(["enrolled_in:cse240"]);
+  });
+
+  it("B and C without the judge get rules text naming CSE 240", async () => {
+    const b = newStudent();
+    const c = newStudent();
+    await handlePutContext(put(b, studentB), deps);
+    expect((await body<ContextBody>(await handlePutContext(put(c, studentC), deps))).open_suggestion).toBe(true);
+    const viewB = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(b), deps));
+    const viewC = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(c), deps));
+    expect(viewB.ask?.text).toBe("Someone in your CSE 240 class is on Super Cub too. Want me to see if you'd both like to connect?");
+    expect(viewC.ask?.text).toBe("Someone taking CSE 240 is on Super Cub too. Want me to see if you'd both like to connect?");
+  });
+
+  it("the guard rejects model text naming the assignment title instead of the course", async () => {
+    const bad = "Someone is also doing CSE 240 Project 1. Want me to see if you'd both like to connect?";
+    deps.judge = mockJudge(() => ({ worth: 0.7, why: "Same course.", text_for_a: bad, text_for_b: bad }));
+    const b = newStudent();
+    const c = newStudent();
+    await handlePutContext(put(b, studentB), deps);
+    await handlePutContext(put(c, studentC), deps);
+    const view = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(c), deps));
+    expect((await getSuggestion(store, view.ask?.id ?? ""))?.texts_from).toBe("rules");
+  });
+
+  it("two students sharing only a school get nothing, and the judge is not called", async () => {
+    const judge = mockJudge(() => ({ worth: 1, why: "x", text_for_a: "Someone at ASU. Want to connect?", text_for_b: "Someone at ASU. Want to connect?" }));
+    deps.judge = judge;
+    const a = newStudent();
+    const c = newStudent();
+    await handlePutContext(put(a, studentA), deps);
+    expect((await body<ContextBody>(await handlePutContext(put(c, studentC), deps))).open_suggestion).toBe(false);
+    expect(judge.calls).toHaveLength(0);
   });
 });
 

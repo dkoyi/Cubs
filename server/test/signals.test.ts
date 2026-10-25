@@ -98,20 +98,43 @@ describe("prefilter score", () => {
 
   it("adds course, assignment due soon, open_to and free overlap", () => {
     expect(prefilterScore(ctx("a", "A", [course]), ctx("b", "B", [course]), NOW)).toBe(0.3);
-    expect(prefilterScore(ctx("a", "A", [course, hw4]), ctx("b", "B", [course, hw4]), NOW)).toBe(0.6);
-    expect(prefilterScore(ctx("a", "A", [course, hw4, study], freeA), ctx("b", "B", [course, hw4, study], freeB), NOW)).toBe(0.9);
+    expect(prefilterScore(ctx("a", "A", [course, hw4]), ctx("b", "B", [course, hw4]), NOW)).toBe(0.9);
+    expect(prefilterScore(ctx("a", "A", [course, hw4, study], freeA), ctx("b", "B", [course, hw4, study], freeB), NOW)).toBe(1);
   });
 
-  it("an assignment due more than 7 days out does not count", () => {
+  it("an assignment due more than 7 days out still counts, without the due-soon bonus", () => {
     const later = sig({ type: "working_on", entity: { kind: "assignment", label: "HW4" }, due: "2026-11-10T00:00:00Z", source: "canvas" });
-    expect(prefilterScore(ctx("a", "A", [course, later]), ctx("b", "B", [course, later]), NOW)).toBe(0.3);
+    expect(prefilterScore(ctx("a", "A", [course, later]), ctx("b", "B", [course, later]), NOW)).toBe(0.8);
   });
 
   it("counts an event within 14 days and can-help matches", () => {
     const fair = sig({ type: "attending", entity: { kind: "event", label: "Career Fair" }, when: "2026-10-30T10:00:00Z", source: "student" });
     const helps = sig({ type: "can_help_with", entity: { kind: "topic", label: "recursion" }, source: "memory" });
     const needs = sig({ type: "working_on", entity: { kind: "topic", label: "Recursion" }, source: "memory" });
-    expect(prefilterScore(ctx("a", "A", [fair, helps]), ctx("b", "B", [fair, needs]), NOW)).toBe(0.6);
+    expect(prefilterScore(ctx("a", "A", [fair, helps]), ctx("b", "B", [fair, needs]), NOW)).toBe(0.7);
+  });
+
+  it("scores undated memory signals: working_on alone reaches the cutoff, events and interests add up", () => {
+    const project = sig({ type: "working_on", entity: { kind: "topic", label: "AI project" }, source: "memory" });
+    const hackathon = sig({ type: "attending", entity: { kind: "event", label: "Cubbie Hackathon" }, source: "memory" });
+    const voice = sig({ type: "interested_in", entity: { kind: "topic", label: "Voice AI" }, source: "memory" });
+    expect(prefilterScore(ctx("a", "A", [project]), ctx("b", "B", [project]), NOW)).toBe(0.5);
+    expect(prefilterScore(ctx("a", "A", [hackathon]), ctx("b", "B", [hackathon]), NOW)).toBe(0.3);
+    expect(prefilterScore(ctx("a", "A", [voice]), ctx("b", "B", [voice]), NOW)).toBe(0.2);
+    expect(prefilterScore(ctx("a", "A", [hackathon, voice]), ctx("b", "B", [hackathon, voice]), NOW)).toBe(0.5);
+  });
+
+  it("links a course to the other student's assignment for it, by whole words or prefix", () => {
+    const cse240 = sig({ type: "enrolled_in", entity: { kind: "course", label: "CSE 240" }, source: "canvas" });
+    const work = (label: string, kind = "assignment") =>
+      sig({ type: "working_on", entity: { kind, label }, source: "memory" });
+    const score = (w: Signal) => prefilterScore(ctx("a", "A", [cse240]), ctx("b", "B", [w]), NOW);
+    expect(score(work("CSE 240 Project 1"))).toBe(0.6);
+    expect(score(work("Project 1 for CSE240"))).toBe(0.6);
+    expect(score(work("CSE240 Project 1", "course"))).toBe(0.6);
+    expect(score(work("CSE 2401 Project"))).toBe(0);
+    expect(score(work("CSE 2401", "course"))).toBe(0);
+    expect(score(work("CSE 310 Project 1"))).toBe(0);
   });
 });
 
