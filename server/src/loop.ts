@@ -15,7 +15,7 @@ import {
   discoverableTo,
   guardText,
   guardWhy,
-  mutualSignals,
+  mutualSignals, judgeSignals,
   prefilterScore,
   rulesText,
   rulesWhy,
@@ -27,7 +27,7 @@ import {
 } from "./discovery.js";
 import type { StudentContext } from "./discovery.js";
 import { JUDGE_THRESHOLD } from "./judge.js";
-import type { Judge } from "./judge.js";
+import type { Judge, Judgment } from "./judge.js";
 import { describeSpan, firstMeetingTime } from "./match.js";
 import type { TimeWindow } from "./match.js";
 import { CONTEXT_LIMITS, isFresh, isTimeZone, parseFree, parsePolicy, parseSignal, signalId, signalPermissionError, standingConsent, zoneOffsetMinutes } from "./signals.js";
@@ -51,6 +51,8 @@ const LOW_WORTH_COOLDOWN_SECONDS = 3600;
 const ASK_HOURS = 48;
 const LATER_HOURS = 24;
 const DAY_MS = 24 * HOUR_MS;
+/** With a model judge, this many candidates are judged per discovery, in parallel. */
+const MODEL_CANDIDATES = 8;
 
 /** Suggestions per person per day, set server-wide; a person's own cap of 0 still means none. */
 export function maxPerDay(): number {
@@ -347,13 +349,25 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
   }
   candidates.sort((x, y) => y.prefilter - x.prefilter || x.other.updated_at.localeCompare(y.other.updated_at));
 
-  for (const { other, prefilter } of candidates.slice(0, CANDIDATES_PER_STUDENT)) {
+  // The model judges meaning, so give it a wider pool than word overlap would pick, judged in parallel, best first.
+  const pool: Array<Candidate & { kind: Activity; evidence: ReturnType<typeof connectionEvidence>; signature: string; previous: Awaited<ReturnType<typeof relationshipFor>>; verdict: Judgment | null }> = [];
+  for (const { other, prefilter } of candidates.slice(0, judge === null ? CANDIDATES_PER_STUDENT : MODEL_CANDIDATES)) {
     const kind = suggestionKind(me, other, now) ?? "collaboration";
     const evidence = connectionEvidence(me, other, now);
     const signature = connectionSignature(sid, other.student_id, evidence, kind);
     const previous = await relationshipFor(store, sid, other.student_id);
     if (!mayReconnect(previous, signature)) continue;
     if ((await store.get(k.reason(sid, other.student_id, signature))) !== null) continue;
+    pool.push({ other, prefilter, kind, evidence, signature, previous, verdict: null });
+  }
+  if (judge !== null) {
+    await Promise.all(pool.map(async (c) => {
+      c.verdict = await judge.judge({ shared: sharedSignals(me, c.other, now).slice(0, 48), a: judgeSignals(me, now), b: judgeSignals(c.other, now), prefilter: c.prefilter, evidence: c.evidence, reconnecting: c.previous !== null });
+    }));
+    pool.sort((x, y) => (y.verdict?.worth ?? -1) - (x.verdict?.worth ?? -1));
+  }
+
+  for (const { other, prefilter, kind, signature, previous, verdict } of pool) {
     const shared = sharedSignals(me, other, now);
     let textA = rulesText(me, other, now);
     let textB = rulesText(other, me, now);
@@ -362,8 +376,6 @@ export async function runDiscovery(store: Store, sid: string, now: Date, judge: 
     let judgeName: Suggestion["judge"] = "rules";
     let textsFrom: Suggestion["texts_from"] = "rules";
 
-    const [mutualA, mutualB] = mutualSignals(me, other, now);
-    const verdict = judge === null ? null : await judge.judge({ shared: shared.slice(0, 48), a: mutualA.slice(0, 48), b: mutualB.slice(0, 48), prefilter, evidence, reconnecting: previous !== null });
     if (verdict === null) {
       console.log(judge === null ? "judge: rules" : `judge: rules (${judge.name} gave no usable answer)`);
     } else {

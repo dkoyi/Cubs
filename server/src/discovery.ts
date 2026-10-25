@@ -368,6 +368,15 @@ export function mutualSignals(a: StudentContext, b: StudentContext, now: Date): 
   return [viewA, viewB];
 }
 
+/** Each person's full approved fresh signals, so the model can judge meaning rather than literal overlap. */
+export function judgeSignals(c: StudentContext, now: Date): JudgeSignal[] {
+  const out: JudgeSignal[] = [];
+  for (const s of fresh(c, now)) {
+    if (!out.some((x) => x.type === s.type && x.label === s.entity.label)) out.push({ type: s.type, kind: s.entity.kind, label: s.entity.label });
+  }
+  return out.slice(0, 40);
+}
+
 export const MAX_TEXT_CHARS = 400;
 
 const names = (a: StudentContext, b: StudentContext): string[] =>
