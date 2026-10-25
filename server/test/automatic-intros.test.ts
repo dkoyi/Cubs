@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAnswer, handleCapabilities, handlePutContext, handleSuggestions } from "../src/handlers.js";
 import type { Deps } from "../src/handlers.js";
+import type { Judge } from "../src/judge.js";
 import { getContext, getSuggestion } from "../src/loop.js";
 import { DEFAULT_POLICY, parsePolicy } from "../src/signals.js";
 import type { Policy } from "../src/signals.js";
@@ -29,7 +30,7 @@ function context(name: string, automatic: boolean, approval = new Date(now).toIS
   ], replace_signals: true };
 }
 async function put(p: Person, body: unknown) { return handlePutContext(request(p, "context", "PUT", body), deps); }
-async function pending(p: Person) { return (await handleSuggestions(request(p, "suggestions"), deps)).json() as Promise<{ ask: { id: string; text: string; other_consent?: string } | null; agreed: Array<{ id: string; contact: string; text: string; profile?: { name: string }; consent?: { you: string; other: string } }> }>; }
+async function pending(p: Person) { return (await handleSuggestions(request(p, "suggestions"), deps)).json() as Promise<{ ask: { id: string; text: string; other_consent?: string } | null; agreed: Array<{ id: string; contact: string; text: string; profile?: { name: string }; consent?: { you: string; other: string }; reason?: string }> }>; }
 async function answer(p: Person, id: string, value: string) { return (await handleAnswer(request(p, `suggestions/${id}/answer`, "POST", { answer: value }), deps)).json() as Promise<{ status: string; contact?: string }>; }
 
 describe("bounded standing introduction permission", () => {
@@ -52,7 +53,7 @@ describe("bounded standing introduction permission", () => {
     expect(await pending(a)).toMatchObject({ ask: null, agreed: [] });
     const manual = await pending(b);
     expect(manual.ask?.other_consent).toBe("standing");
-    expect(manual.ask?.text).toContain("opted into automatic introductions");
+    expect(manual.ask?.text).toMatch(/They're up for it\. Want the intro\?$/);
     expect(manual.agreed).toEqual([]);
     expect(await answer(b, manual.ask!.id, "yes")).toMatchObject({ status: "agreed", contact: "alex@example.test" });
     expect((await pending(a)).agreed[0]?.contact).toBe("jordan@example.test");
@@ -65,7 +66,7 @@ describe("bounded standing introduction permission", () => {
     expect((await pending(a)).ask).not.toBeNull();
     expect((await pending(a)).agreed).toEqual([]);
   });
-  it("does not use expired or uncovered activity grants and never refreshes approval by sync", async () => {
+  it("does not use expired grants, never refreshes approval by sync, and does not limit a grant to its listed activities", async () => {
     const a = person(), b = person();
     const at = new Date(now - 366 * DAY).toISOString();
     await put(a, context("Alex", true, at)); await put(b, context("Jordan", true));
@@ -75,8 +76,10 @@ describe("bounded standing introduction permission", () => {
     expect((await getContext(store, a.id))?.policy.automatic_intro_consent?.approved_at).toBe(at);
     const c = person(), d = person();
     await put(c, context("Casey", true, undefined, ["advising"])); await put(d, context("Dana", true));
-    expect((await pending(c)).ask).not.toBeNull();
-    expect((await pending(c)).agreed).toEqual([]);
+    const unlisted = await pending(c);
+    expect(unlisted.ask).toBeNull();
+    expect(unlisted.agreed).toHaveLength(1);
+    expect(unlisted.agreed[0]).toMatchObject({ contact: "dana@example.test", consent: { you: "standing", other: "standing" } });
   });
   it("invalidates old standing permission when the contact or scope changes", async () => {
     const a = person(), b = person();
@@ -118,5 +121,24 @@ describe("bounded standing introduction permission", () => {
     expect(await getContext(store, a.id)).toBeNull();
     const caps = await handleCapabilities(new Request("https://supercub.test/api/capabilities"), deps);
     expect(await caps.json()).toEqual({ skill_release: SKILL_RELEASE, capabilities: CAPABILITIES });
+  });
+  it("automatic intro text says the name once, after Meet, and keeps the named reason separately", async () => {
+    const cases: Array<[string, string]> = [
+      ["Someone is also attending Dev Hacks.", "Meet Jordan. They're also attending Dev Hacks."],
+      ["Someone has offered to help with healthcare.", "Meet Jordan. They have offered to help with healthcare."],
+      ["Someone's working on healthcare too.", "Meet Jordan. They're working on healthcare too."],
+    ];
+    for (const [reason, head] of cases) {
+      store = new InMemoryStore(() => now);
+      const text = `${reason} Want an intro?`;
+      const judge: Judge = { name: "mock", async judge() { return { worth: 0.9, why: "ok", text_for_a: text, text_for_b: text }; } };
+      deps = { store, now: () => new Date(now), judge };
+      const a = person(), b = person();
+      await put(a, context("Alex", true)); await put(b, context("Jordan", true));
+      const agreed = (await pending(a)).agreed[0];
+      expect(agreed?.text).toBe(head);
+      expect(agreed?.text).not.toContain("Jordan Example");
+      expect(agreed?.reason).toBe(reason.replace(/^Someone/, "Jordan Example"));
+    }
   });
 });

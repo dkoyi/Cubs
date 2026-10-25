@@ -38,6 +38,7 @@ interface ContextBody {
   rejected: Array<{ index: number; reason: string }>;
   signals_total: number;
   open_suggestion: boolean;
+  events: unknown[];
 }
 interface SuggestionsBody {
   ask: AskView | null;
@@ -114,14 +115,14 @@ describe("two-student loop", () => {
     let res = await handlePutContext(put(alex, alexCtx), deps);
     expect(res.status).toBe(200);
     const first = await body<ContextBody>(res);
-    expect(first).toEqual({ accepted: 3, rejected: [], signals_total: 3, open_suggestion: false });
+    expect(first).toEqual({ accepted: 3, rejected: [], signals_total: 3, open_suggestion: false, events: [] });
 
     res = await handlePutContext(put(jordan, jordanCtx), deps);
     expect((await body<ContextBody>(res)).open_suggestion).toBe(true);
 
     // Re-sending the same context is idempotent: same counts, still one suggestion.
     const again = await body<ContextBody>(await handlePutContext(put(alex, alexCtx), deps));
-    expect(again).toEqual({ accepted: 3, rejected: [], signals_total: 3, open_suggestion: true });
+    expect(again).toEqual({ accepted: 3, rejected: [], signals_total: 3, open_suggestion: true, events: [] });
 
     const asks: AskView[] = [];
     for (const s of [alex, jordan]) {
@@ -229,7 +230,7 @@ describe("two-student loop", () => {
 });
 
 describe("answers", () => {
-  it("no passes for both sides and cools the pair down", async () => {
+  it("no passes for both sides, cools the pair down for an hour and blocks the same reason for a day", async () => {
     const { alex, jordan, id } = await pair();
     expect(await body<AnswerBody>(await handleAnswer(answer(jordan, id, "no"), deps))).toEqual({ status: "passed" });
     for (const s of [alex, jordan]) {
@@ -238,15 +239,18 @@ describe("answers", () => {
     expect(await body<AnswerBody>(await handleAnswer(answer(alex, id, "yes"), deps))).toEqual({ status: "passed" });
     expect((await handleAnswer(answer(jordan, id, "yes"), deps)).status).toBe(409);
 
-    // A week later both are under their caps again, but the pair is still cooling down.
-    nowMs += 8 * 24 * HOUR;
-    const freshCtx = (c: typeof alexCtx) => ({
-      ...c,
-      free: [{ start: "2026-11-02T18:00:00-07:00", end: "2026-11-02T21:00:00-07:00" }],
-    });
-    await handlePutContext(put(alex, freshCtx(alexCtx)), deps);
-    const res = await body<ContextBody>(await handlePutContext(put(jordan, freshCtx(jordanCtx)), deps));
-    expect(res.open_suggestion).toBe(false);
+    const resync = async (): Promise<boolean> => {
+      await handlePutContext(put(alex, alexCtx), deps);
+      return (await body<ContextBody>(await handlePutContext(put(jordan, jordanCtx), deps))).open_suggestion;
+    };
+    // Inside the one-hour pair cooldown nothing new is suggested.
+    expect(await resync()).toBe(false);
+    // After the cooldown the pair is free again, but the same reason is still blocked for a day.
+    nowMs += 2 * HOUR;
+    expect(await resync()).toBe(false);
+    // Once the day has passed, the same reason may be suggested again.
+    nowMs += 23 * HOUR;
+    expect(await resync()).toBe(true);
   });
 
   it("later re-asks after 24 hours once; a second later counts as no", async () => {
@@ -337,7 +341,7 @@ describe("discovery rules", () => {
     await handlePutContext(put(s, alexCtx), deps);
     const res = await handlePutContext(put(s, { tz: "America/Phoenix", policy: { participating: false } }), deps);
     expect(res.status).toBe(200);
-    expect(await body<ContextBody>(res)).toEqual({ accepted: 0, rejected: [], signals_total: 0, open_suggestion: false });
+    expect(await body<ContextBody>(res)).toEqual({ accepted: 0, rejected: [], signals_total: 0, open_suggestion: false, events: [] });
     const raw = (await store.get(`ctx:${s.id}`)) ?? "";
     expect(raw).not.toContain("CSE 310");
     expect(raw).toContain('"free":[]');
@@ -432,13 +436,37 @@ describe("permission revocation", () => {
     expect((await handlePutContext(put(alex, { replace_signals: "yes" }), deps)).status).toBe(400);
   });
 
-  it("the fresh weekly cap is one suggestion unless explicitly configured", async () => {
+  it("the daily cap defaults to several suggestions, follows SUPERCUB_MAX_PER_DAY, and a personal cap of 0 means none", async () => {
     const { alex, id } = await pair();
     await handleAnswer(answer(alex, id, "no"), deps);
     const third = newStudent();
     const res = await body<ContextBody>(await handlePutContext(put(third, context("Taylor", "taylor@example.edu", [])), deps));
-    // Jordan and Alex each used their weekly cap, so Taylor cannot get a new ask with either.
-    expect(res.open_suggestion).toBe(false);
+    // Alex and Jordan have each had one suggestion today, under the default daily cap of 5.
+    expect(res.open_suggestion).toBe(true);
+
+    const saved = process.env.SUPERCUB_MAX_PER_DAY;
+    process.env.SUPERCUB_MAX_PER_DAY = "1";
+    try {
+      store = new InMemoryStore(() => nowMs);
+      deps = { store, now: () => new Date(nowMs) };
+      const capped = await pair();
+      await handleAnswer(answer(capped.alex, capped.id, "no"), deps);
+      const fourth = newStudent();
+      const blocked = await body<ContextBody>(await handlePutContext(put(fourth, context("Riley", "riley@example.edu", [])), deps));
+      // Alex and Jordan used the configured cap of one, so Riley cannot get a new ask with either.
+      expect(blocked.open_suggestion).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.SUPERCUB_MAX_PER_DAY;
+      else process.env.SUPERCUB_MAX_PER_DAY = saved;
+    }
+
+    store = new InMemoryStore(() => nowMs);
+    deps = { store, now: () => new Date(nowMs) };
+    const none = newStudent();
+    const other = newStudent();
+    await handlePutContext(put(none, { ...alexCtx, policy: { ...alexCtx.policy, max_suggestions_per_week: 0 } }), deps);
+    const zero = await body<ContextBody>(await handlePutContext(put(other, jordanCtx), deps));
+    expect(zero.open_suggestion).toBe(false);
   });
 });
 
@@ -562,25 +590,30 @@ describe("model judge (mocked)", () => {
     expect(JSON.stringify(judge.calls[0])).toContain("CSE 310");
   });
 
-  it("falls back to the rules text when the model text breaks the rules", async () => {
-    const bad = [
-      "Jordan in your CSE 310 class wants to study. Want me to see if you'd both like to connect?",
-      "Someone in CSE 310 is on HW4, text them at 480-555-0199. Want me to connect you?",
-      "Someone in CSE 310 is also taking CSE 340. Want me to see if you'd both like to connect?",
-    ];
-    for (const text of bad) {
+  it("falls back to the rules text when the model text names someone or shares contacts, but keeps complementary reasons", async () => {
+    const extra = [{ type: "enrolled_in", entity: { kind: "course", label: "CSE 340" }, source: "canvas" }];
+    const run = async (text: string): Promise<{ text: string | undefined; from: string | undefined }> => {
       store = new InMemoryStore(() => nowMs);
       deps = { store, now: () => new Date(nowMs), judge: mockJudge(() => ({ worth: 0.9, why: "ok", text_for_a: text, text_for_b: goodText })) };
-      const extra = [{ type: "enrolled_in", entity: { kind: "course", label: "CSE 340" }, source: "canvas" }];
       const a = newStudent();
       const b = newStudent();
       await handlePutContext(put(a, alexCtx), deps);
       await handlePutContext(put(b, context("Jordan", "jordan@example.edu", jordanCtx.free, extra)), deps);
       const view = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(b), deps));
-      expect(view.ask?.text).toContain("Someone in your CSE 310 class is working on HW4 too");
-      const stored = await getSuggestion(store, view.ask?.id ?? "");
-      expect(stored?.texts_from).toBe("rules");
+      return { text: view.ask?.text, from: (await getSuggestion(store, view.ask?.id ?? ""))?.texts_from };
+    };
+    const bad = [
+      "Jordan in your CSE 310 class wants to study. Want me to see if you'd both like to connect?",
+      "Someone in CSE 310 is on HW4, text them at 480-555-0199. Want me to connect you?",
+    ];
+    for (const text of bad) {
+      const result = await run(text);
+      expect(result.text).toContain("Someone in your CSE 310 class is working on HW4 too");
+      expect(result.from).toBe("rules");
     }
+    // A label only one side has (CSE 340) is a complementary reason, not a guard failure.
+    const complementary = "Someone in CSE 310 is also taking CSE 340. Want me to see if you'd both like to connect?";
+    expect(await run(complementary)).toEqual({ text: complementary, from: "model" });
   });
 
   it("skips a pair the model scores below 0.6, and uses rules when the model gives nothing", async () => {
@@ -703,25 +736,34 @@ describe("undated memory signals (synthetic adaptations with explicit activity a
     expect(viewC.ask?.text).toBe("Someone taking CSE 240 is open to studying with classmates. Want me to see if you'd both like to connect?");
   });
 
-  it("the guard rejects model text naming the assignment title instead of the course", async () => {
-    const bad = "Someone is also doing CSE 240 Project 1. Want me to see if you'd both like to connect?";
-    deps.judge = mockJudge(() => ({ worth: 0.7, why: "Same course.", text_for_a: bad, text_for_b: bad }));
+  it("the guard allows model text naming one side's assignment title, since complementary reasons are allowed", async () => {
+    const text = "Someone is also doing CSE 240 Project 1. Want me to see if you'd both like to connect?";
+    deps.judge = mockJudge(() => ({ worth: 0.7, why: "Same course.", text_for_a: text, text_for_b: text }));
     const b = newStudent();
     const c = newStudent();
     await handlePutContext(put(b, studentB), deps);
     await handlePutContext(put(c, studentC), deps);
     const view = await body<SuggestionsBody>(await handleSuggestions(getSuggestions(c), deps));
-    expect((await getSuggestion(store, view.ask?.id ?? ""))?.texts_from).toBe("rules");
+    expect(view.ask?.text).toBe(text);
+    expect((await getSuggestion(store, view.ask?.id ?? ""))?.texts_from).toBe("model");
   });
 
-  it("two students sharing only a school get nothing, and the judge is not called", async () => {
+  it("with a model judge, two students sharing only a school are judged; without one they get nothing", async () => {
     const judge = mockJudge(() => ({ worth: 1, why: "x", text_for_a: "Someone at ASU. Want to connect?", text_for_b: "Someone at ASU. Want to connect?" }));
     deps.judge = judge;
     const a = newStudent();
     const c = newStudent();
     await handlePutContext(put(a, studentA), deps);
-    expect((await body<ContextBody>(await handlePutContext(put(c, studentC), deps))).open_suggestion).toBe(false);
-    expect(judge.calls).toHaveLength(0);
+    expect((await body<ContextBody>(await handlePutContext(put(c, studentC), deps))).open_suggestion).toBe(true);
+    expect(judge.calls).toHaveLength(1);
+
+    // The rules-only fallback still needs shared activity and keys above the prefilter.
+    store = new InMemoryStore(() => nowMs);
+    deps = { store, now: () => new Date(nowMs) };
+    const a2 = newStudent();
+    const c2 = newStudent();
+    await handlePutContext(put(a2, studentA), deps);
+    expect((await body<ContextBody>(await handlePutContext(put(c2, studentC), deps))).open_suggestion).toBe(false);
   });
 });
 

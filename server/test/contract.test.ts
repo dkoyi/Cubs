@@ -200,6 +200,14 @@ function contextFile(firstName: string, contact: string): string {
   return path;
 }
 
+/**
+ * The shared store keeps earlier tests' students, and the daily cap (5 by default) no longer keeps
+ * them out of discovery, so a test that needs a known pair takes everyone else out of the pool first.
+ */
+async function isolateDiscovery(): Promise<void> {
+  for (const id of await store.smembers("participants")) await store.srem("participants", id);
+}
+
 describe("Python client sync loop against the real handlers", () => {
   it("runs the approved one-time setup for two people and shares contacts without answer commands", async () => {
     const eli = student(), faye = student();
@@ -285,6 +293,7 @@ describe("Python client sync loop against the real handlers", () => {
   }, 60_000);
 
   it("both students sync, get one ask each, both say yes, and both get the other's contact once", async () => {
+    await isolateDiscovery();
     const alex = student();
     const jordan = student();
     const alexFile = contextFile("Alex", "alex@example.edu");
@@ -349,7 +358,8 @@ describe("Python client sync loop against the real handlers", () => {
   }, 30_000);
 
   it("later prints LATER, and an unknown id prints CLOSED", async () => {
-    // Alex and Jordan from the test above are at their weekly cap, so these two are paired with each other.
+    // Alex and Jordan from the test above are still under the daily cap, so take them out of the pool to pair these two.
+    await isolateDiscovery();
     const casey = student();
     const dana = student();
     for (const s of [casey, dana]) await s("policy", "--participating", "yes");

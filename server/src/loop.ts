@@ -563,7 +563,12 @@ async function agreedView(store: Store, s: Suggestion, sid: string): Promise<Agr
       .replace(/\s*Want me to see if you'd both like to connect\?$/i, "")
       .replace(/\s*[^.?!]*\?$/, "");
     view.reason = rawReason.replace(/\bsomeone\b/i, () => view.profile?.name ?? other.first_name).slice(0, 350);
-    if (view.reason) head = `Meet ${other.first_name}. ${view.reason.replace(/[.!]?$/, ".")}`;
+    // "Meet Marcus. They're also attending ..." rather than repeating the name right after "Meet".
+    const headReason = /^Someone\b/.test(rawReason)
+      ? rawReason.replace(/^Someone\b/, "They").replace(/^They is\b/, "They're").replace(/^They has\b/, "They have")
+        .replace(/^They's\b/, "They're").slice(0, 350)
+      : view.reason;
+    if (view.reason) head = `Meet ${other.first_name}. ${headReason.replace(/[.!]?$/, ".")}`;
   }
   if (s.when === null) return { ...view, text: ownStanding || otherStanding ? head : `${head} Pick a time that works for you both.` };
   const ctx = await getContext(store, sid);

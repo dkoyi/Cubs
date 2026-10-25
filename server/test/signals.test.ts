@@ -38,10 +38,11 @@ const hw4 = sig({
 const study = sig({ type: "open_to", entity: { kind: "activity", label: "Study" }, source: "memory" });
 
 describe("normalization", () => {
-  it("course codes drop case, punctuation and spaces; other kinds keep words", () => {
+  it("course codes and event names drop case, punctuation and spaces; other kinds keep words", () => {
     expect(normalizeEntityKey("course", "CSE 310")).toBe("cse310");
     expect(normalizeEntityKey("course", "cse-310")).toBe("cse310");
-    expect(normalizeEntityKey("event", "Devils Invent:  Hackathon!")).toBe("devils invent hackathon");
+    expect(normalizeEntityKey("event", "Devils Invent:  Hackathon!")).toBe("devilsinventhackathon");
+    expect(normalizeEntityKey("event", "DevilsInvent Hackathon")).toBe(normalizeEntityKey("event", "Devils Invent Hackathon"));
     expect(normalizeEntityKey("topic", "Hash Tables")).toBe("hash tables");
     expect(normalizeEntityKey("topic", "Café")).toBe("cafe");
   });
@@ -191,13 +192,15 @@ describe("guard on model text", () => {
     );
   });
 
-  it("rejects names, contacts, links, markup and entities only one side has", () => {
+  it("rejects names, contacts, links and markup, but allows labels only one side has", () => {
     expect(guardText("Jordan is in CSE 310 too. Want to connect?", a, b, NOW)).toBeNull();
     expect(guardText("Someone in CSE 310, email j@asu.edu. Want to connect?", a, b, NOW)).toBeNull();
     expect(guardText("Someone in CSE 310, see https://x.y. Want to connect?", a, b, NOW)).toBeNull();
     expect(guardText("Someone in <b>CSE 310</b>. Want to connect?", a, b, NOW)).toBeNull();
-    expect(guardText("Someone in CSE 310 also takes MAT343. Want to connect?", a, b, NOW)).toBeNull();
-    expect(guardText("Someone in CSE 310 also takes mat 343. Want to connect?", a, b, NOW)).toBeNull();
+    // Complementary reasons may name a label from either person's approved signals.
+    expect(guardText("Someone in CSE 310 also takes MAT343. Want to connect?", a, b, NOW)).toBe(
+      "Someone in CSE 310 also takes MAT343. Want to connect?",
+    );
     expect(guardText(42, a, b, NOW)).toBeNull();
   });
 });

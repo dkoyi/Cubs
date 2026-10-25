@@ -69,7 +69,7 @@ describe("profile-led introductions", () => {
     const details = await (await handleSuggestions(req(a, `suggestions?id=${ask.id}`), deps)).json() as { ask: AskView };
     expect(details.ask.profile?.links).toEqual(profile.links);
     expect(details.ask.other_accepted).toBe(true);
-    expect(details.ask.text).toContain("They've already said yes. Want the intro?");
+    expect(details.ask.text).toContain("They're up for it. Want the intro?");
     expect((await handleSuggestions(req(person(), `suggestions?id=${ask.id}`), deps)).status).toBe(404);
   });
 
