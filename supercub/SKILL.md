@@ -46,7 +46,7 @@ When the student offers help, even once and even without joining, remember the o
 
 On the next request, reuse what you remember and only confirm it in one short text instead of asking again: "Still want to share your email, and still good at React?" A yes keeps it. If they correct anything, use the new answer and update the memory. Memory never replaces consent: step 6 still runs before every join.
 
-Never remember grades, free times, Canvas files or email contents. Never remember anything about the other student beyond what the match shows.
+Never remember grades, Canvas files or email contents. Never remember free times, except the weekly free times asked for in Sync. Never remember anything about the other student beyond what the match shows.
 
 ## What is shared
 
@@ -165,7 +165,7 @@ Sync is how Super Cub notices on its own. On a schedule, you gather a few facts 
 
 Ask these once, one text at a time, the first time the student uses Super Cub after installing or updating it. Remember the answers in the student's Cubbie memory and don't ask again.
 
-1. "Super Cub can also notice connections on its own. It would share a few facts about your classes and what you're working on with the Super Cub network, never your grades, emails or messages, and only suggest a connection when both people say yes. Want in?"
+1. "Super Cub can also notice connections on its own. It would share a few facts about your classes and what you're working on with the Super Cub network, never your grades, emails or messages, and only suggest a connection when both people say yes. You'd be open to study partners, teammates, meals and buddies, and you can change that with one text. Want in?"
    On no, run `python3 scripts/connect.py policy --participating no`, and stop. Noticing still works.
 2. "Who should be able to be matched with you: people in your classes, anyone at your school, or anyone on Super Cub?" Classes is `section`, school is `school`, anyone is `network`. Default `school`.
 3. "Can I share names of public-looking events from your calendar and email, like hackathons and career fairs? Yes or no." Default no.
@@ -179,12 +179,16 @@ If you don't remember a contact for them, ask step 5's question once. To change 
 
 ### Each sync
 
-1. Gather, with your own abilities. Skip anything not connected; during a scheduled run, don't ask.
-   - Canvas: their courses (code, name, section) and assignments due in the next 14 days (title, due date). For a course, `detail` is only the section, like "section 12345"; never the instructor.
-   - Google Calendar: free blocks of at least 1 hour in the next 7 days, 8 am to 11 pm in their time zone. Up to 10.
-   - Only if they said yes to events: names of public-looking events in their calendar and email events, like hackathons, career fairs, clubs, talks and workshops.
-   - Your memory: what they are working on, interested in, can help with, and open to (study, teammates, rides, mentoring, meals, buddies).
-2. Write it to `~/.config/supercub/context.json` in the shape of `assets/context-example.json`: their time zone; first name, school and contact from memory; up to 60 signals; free times with a UTC offset. A signal's `detail` is optional and 120 characters at most. Never write grades, email subjects, other people's names or private calendar titles.
+1. Gather, with your own abilities, and turn what you find into typed signals, in this order. Skip anything not connected; during a scheduled run, don't ask, except once for free times below. Set `source` to where each one came from: canvas, calendar, email, memory or student.
+   - `enrolled_in`: each current Canvas course. The label is only the course code, like "CSE 310". `detail` is only the section, like "section 12345"; never the instructor.
+   - `working_on`: each Canvas assignment or project due in the next 14 days, with `due` set. The label is the course code plus the title, like "CSE 240 Project 1". Also anything they told you they are building or working on, from memory, like "hackathon app", with no `due`.
+   - `attending`: only if they said yes to events, public-looking events from their calendar and email events, like hackathons, career fairs, clubs, talks and workshops, with `when` set. Also anything they told you they are attending, from memory, even if they said no to events, since they told you directly. Write it either way; the script only sends what their answers allow.
+   - `interested_in`: topics they have shown interest in across your conversations and memory, like hobbies, fields, technologies and career goals. Up to 8, with short labels like "machine learning" or "rock climbing".
+   - `can_help_with`: subjects they have done well in or offered to help with, from memory, and Canvas courses they have already finished if you can see them. Up to 6, like "recursion" or "CSE 205".
+   - `open_to`: study, teammates, meals and buddies, which they agreed to at setup. Add rides only if they have mentioned rides. If they text a change, like "no meals" or "add rides", remember it and use that from then on.
+   - Free times: Google Calendar free blocks of at least 1 hour in the next 7 days, 8 am to 11 pm in their time zone. Up to 10. If Calendar is not connected and you don't remember their free times, ask once, even during a scheduled run: "When are you usually free this week? Give me 3 to 5 times, an hour or more each." Remember the answer, and on each sync turn it into dates in the next 7 days.
+2. Write it to `~/.config/supercub/context.json` in the shape of `assets/context-example.json`: their time zone; first name, school and contact from memory; up to 60 signals; free times with a UTC offset. A signal's `detail` is optional and 120 characters at most. Nothing from Canvas, Calendar or email goes anywhere except as these typed signals. Never write grades, email subjects, other people's names or private calendar titles, and never write `applying_to`.
+   Quality check before writing: at least one signal of each type you have data for, every label under 60 characters, no grades, no people's names, no email subjects.
 3. Run `python3 scripts/connect.py sync --file ~/.config/supercub/context.json` (it can take up to 2 minutes; let it finish), then `python3 scripts/connect.py check` for direct requests. If both have something, send one combined message.
 4. Relay the result:
    - `NOTHING NEW`: say nothing during a scheduled run.
@@ -203,7 +207,7 @@ If you don't remember a contact for them, ask step 5's question once. To change 
 ## Leaving
 
 Mention once, after joining: "Text me 'leave campus connect' anytime and I'll delete your info."
-When they text "leave campus connect" or "leave super cub", or ask to delete their info, confirm first, then run `python3 scripts/connect.py leave`. It deletes everything about them from the server and this device. It also deletes the context file. On `LEFT` or `NOTHING TO DELETE`, cancel the scheduled check-ins (sync, matching and noticing) and forget everything you remembered for Super Cub: their name, needs, offers, contact choice, campus, usual groups, noticing answer and Sync answers. `NOTHING TO DELETE` means the server had nothing stored.
+When they text "leave campus connect" or "leave super cub", or ask to delete their info, confirm first, then run `python3 scripts/connect.py leave`. It deletes everything about them from the server and this device. It also deletes the context file. On `LEFT` or `NOTHING TO DELETE`, cancel the scheduled check-ins (sync, matching and noticing) and forget everything you remembered for Super Cub: their name, needs, offers, contact choice, campus, usual groups, noticing answer, Sync answers and remembered free times. `NOTHING TO DELETE` means the server had nothing stored.
 
 To show where things stand, run `python3 scripts/connect.py status`.
 

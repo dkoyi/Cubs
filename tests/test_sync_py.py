@@ -396,7 +396,8 @@ class SyncSkillMdTests(unittest.TestCase):
         for line in (
             "Super Cub can also notice connections on its own. It would share a few facts about your classes and "
             "what you're working on with the Super Cub network, never your grades, emails or messages, and only "
-            "suggest a connection when both people say yes. Want in?",
+            "suggest a connection when both people say yes. You'd be open to study partners, teammates, meals and "
+            "buddies, and you can change that with one text. Want in?",
             "Who should be able to be matched with you: people in your classes, anyone at your school, or anyone "
             "on Super Cub?",
             "Can I share names of public-looking events from your calendar and email, like hackathons and career "

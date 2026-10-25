@@ -897,7 +897,10 @@ def clean_signal(raw: object, policy: JsonDict, tz: Optional[tzinfo], now: datet
     entity_kind = entity.get("kind")
     if kind_of not in SIGNAL_TYPES or entity_kind not in ENTITY_KINDS:
         return None
-    if not policy["share_events"] and (kind_of == "attending" or entity_kind == "event"):
+    # Events mined from calendar or email need the student's events answer. Events the student
+    # told Cubbie about directly (source memory or student) are always allowed.
+    mined = raw.get("source") not in ("memory", "student")
+    if not policy["share_events"] and mined and (kind_of == "attending" or entity_kind == "event"):
         return None
     if not policy["share_applications"] and (kind_of == "applying_to" or entity_kind == "company"):
         return None

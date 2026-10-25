@@ -202,7 +202,8 @@ export function parseSignal(raw: unknown, policy: Policy, now: Date): Result<Sig
   if (!isRecord(raw)) return fail("signal must be an object");
   if (!includes(SIGNAL_TYPES, raw.type)) return fail(`type must be one of: ${SIGNAL_TYPES.join(", ")}`);
   const type = raw.type;
-  if (type === "attending" && !policy.share_events) return fail("share_events is off");
+  const saidDirectly = raw.source === "memory" || raw.source === "student";
+  if (type === "attending" && !policy.share_events && !saidDirectly) return fail("share_events is off");
   if (type === "applying_to" && !policy.share_applications) return fail("share_applications is off");
 
   const entity = raw.entity;

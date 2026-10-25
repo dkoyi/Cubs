@@ -105,7 +105,7 @@ export async function putContext(store: Store, sid: string, body: unknown, now: 
   if (p.participating) {
     for (const s of existing?.signals ?? []) {
       if (!isFresh(s, now)) continue;
-      if (s.type === "attending" && !p.share_events) continue;
+      if (s.type === "attending" && !p.share_events && s.source !== "memory" && s.source !== "student") continue;
       if (s.type === "applying_to" && !p.share_applications) continue;
       byId.set(signalId(s), s);
     }
