@@ -30,10 +30,9 @@
   .lede { color:var(--ink-soft); font-size:1.15rem; margin:0 0 1.75rem; max-width:26rem; }
   .card { background:var(--card); border-radius:20px; box-shadow:0 0 0 2px var(--ink), 0 24px 44px -26px rgb(15 35 80 / .55); padding:1.5rem 1.25rem 1.25rem; text-align:center; position:relative; }
   .sticky { position:absolute; top:-14px; left:18px; transform:rotate(-4deg); background:var(--sticky); color:var(--ink); font-family:var(--font-hand); font-size:.95rem; padding:.2rem .65rem; border-radius:8px; box-shadow:0 0 0 2px var(--ink); }
-  .qr { width:220px; height:220px; display:block; margin:.9rem auto 1rem; background:#fff; border-radius:16px; padding:12px; box-shadow:0 0 0 2px var(--ink); }
-  .qr path { fill:var(--ink); }
+  .msg { margin:.9rem 0 1rem; padding:.9rem 1rem; text-align:left; white-space:pre-wrap; word-break:break-all; font:.95rem/1.45 ui-monospace, "SF Mono", Menlo, monospace; color:var(--ink); background:var(--paper-deep); border-radius:14px; box-shadow:0 0 0 2px var(--ink); -webkit-user-select:all; user-select:all; }
   .hint { color:var(--ink-soft); font-size:.95rem; margin:0 0 1.1rem; }
-  .btn { display:block; text-decoration:none; color:#fff; font-weight:800; font-size:1.05rem; padding:.9rem 1.1rem; border-radius:999px; background:linear-gradient(#4b9af3,#1f6fe0); box-shadow:inset 0 1px #ffffff59, 0 3px #1b4fa8, 0 14px 26px -10px #1f6fe0b3; transition:transform .25s var(--ease-out-soft), box-shadow .25s var(--ease-out-soft); }
+  .btn { display:block; width:100%; border:0; cursor:pointer; font-family:inherit; text-decoration:none; color:#fff; font-weight:800; font-size:1.05rem; padding:.9rem 1.1rem; border-radius:999px; background:linear-gradient(#4b9af3,#1f6fe0); box-shadow:inset 0 1px #ffffff59, 0 3px #1b4fa8, 0 14px 26px -10px #1f6fe0b3; transition:transform .25s var(--ease-out-soft), box-shadow .25s var(--ease-out-soft); }
   .btn:active { transform:translateY(2px); box-shadow:inset 0 1px #ffffff59, 0 1px #1b4fa8, 0 8px 18px -10px #1f6fe0b3; }
   .steps { margin:2.25rem 0 0; padding:0; list-style:none; counter-reset:step; }
   .steps li { position:relative; padding-left:3rem; margin:1rem 0; color:var(--ink-soft); }
@@ -56,14 +55,29 @@
 
   <section class="card" aria-labelledby="install">
     <span class="sticky" aria-hidden="true">three taps</span>
-    <h2 id="install" class="display" style="font-size:1.4rem;margin:.6rem 0 0">Scan to text Cubbie</h2>
-    <svg class="qr" width="54.0mm" height="54.0mm" viewBox="0 0 54.0 54.0"><path transform="scale(1.2)" class="qrline" stroke="#000" d="M2 2.5h7m3 0h1m5 0h1m2 0h6m3 0h5m1 0h7m-41 1h1m5 0h1m2 0h2m1 0h1m1 0h1m3 0h1m2 0h2m2 0h1m1 0h1m4 0h1m1 0h1m5 0h1m-41 1h1m1 0h3m1 0h1m1 0h2m1 0h1m1 0h1m1 0h2m1 0h2m1 0h2m4 0h2m2 0h2m1 0h1m1 0h3m1 0h1m-41 1h1m1 0h3m1 0h1m1 0h1m1 0h3m2 0h2m1 0h1m3 0h1m3 0h4m1 0h1m2 0h1m1 0h3m1 0h1m-41 1h1m1 0h3m1 0h1m1 0h2m4 0h6m1 0h4m3 0h1m1 0h1m1 0h1m1 0h1m1 0h3m1 0h1m-41 1h1m5 0h1m1 0h3m3 0h1m3 0h1m2 0h2m2 0h1m1 0h1m4 0h1m1 0h1m5 0h1m-41 1h7m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h7m-33 1h2m2 0h1m1 0h3m2 0h4m3 0h2m2 0h2m-32 1h1m1 0h5m3 0h2m1 0h1m3 0h1m6 0h3m1 0h2m4 0h5m-39 1h2m1 0h1m3 0h2m1 0h2m7 0h6m1 0h1m1 0h1m2 0h6m3 0h1m-41 1h1m1 0h1m2 0h2m1 0h5m1 0h3m7 0h1m1 0h2m2 0h1m1 0h1m2 0h4m-39 1h3m1 0h2m5 0h1m1 0h2m1 0h1m4 0h2m5 0h1m2 0h2m2 0h3m1 0h2m-41 1h1m1 0h1m3 0h3m2 0h1m2 0h2m1 0h3m1 0h6m1 0h4m1 0h1m4 0h1m-39 1h3m1 0h1m5 0h1m10 0h1m1 0h1m1 0h2m2 0h8m2 0h2m-40 1h1m1 0h1m1 0h3m1 0h1m1 0h3m3 0h2m5 0h2m1 0h2m5 0h3m-37 1h6m5 0h1m1 0h2m1 0h1m2 0h1m1 0h1m2 0h1m1 0h3m2 0h2m1 0h1m2 0h1m2 0h1m-37 1h3m1 0h1m3 0h1m1 0h1m1 0h3m2 0h2m1 0h4m1 0h2m2 0h1m1 0h1m1 0h2m-39 1h2m1 0h2m2 0h1m1 0h1m1 0h3m2 0h6m1 0h2m3 0h1m1 0h5m1 0h1m1 0h1m1 0h1m-39 1h2m1 0h2m1 0h1m3 0h1m1 0h1m1 0h2m2 0h1m4 0h3m2 0h1m1 0h1m1 0h1m2 0h1m1 0h1m-37 1h3m2 0h1m3 0h1m1 0h1m2 0h2m1 0h2m2 0h1m3 0h1m2 0h1m1 0h1m3 0h1m1 0h2m-41 1h1m5 0h1m2 0h1m1 0h1m1 0h3m6 0h6m1 0h1m2 0h1m4 0h3m-39 1h4m2 0h4m2 0h2m1 0h1m1 0h1m1 0h2m1 0h2m1 0h1m1 0h4m1 0h5m2 0h1m-41 1h1m2 0h5m4 0h2m2 0h3m7 0h2m2 0h1m1 0h2m1 0h2m-36 1h5m1 0h2m1 0h2m1 0h2m4 0h1m1 0h1m1 0h2m2 0h1m4 0h6m2 0h1m-41 1h3m3 0h1m2 0h2m4 0h1m1 0h2m5 0h4m1 0h2m2 0h1m1 0h1m1 0h2m-38 1h1m2 0h1m4 0h1m1 0h1m1 0h1m1 0h2m1 0h6m4 0h1m2 0h9m-39 1h1m2 0h3m2 0h2m3 0h1m1 0h3m2 0h1m2 0h1m1 0h3m7 0h2m-37 1h2m4 0h3m1 0h1m1 0h1m4 0h1m1 0h3m4 0h1m3 0h1m5 0h1m1 0h2m-40 1h4m1 0h5m2 0h1m2 0h1m6 0h1m1 0h2m2 0h2m2 0h1m3 0h3m-40 1h3m2 0h1m4 0h1m1 0h1m2 0h2m1 0h4m1 0h1m1 0h2m5 0h1m1 0h3m2 0h2m-41 1h1m1 0h2m1 0h3m1 0h1m2 0h1m1 0h1m1 0h1m3 0h1m1 0h1m2 0h3m7 0h1m1 0h2m-39 1h1m1 0h1m1 0h2m2 0h2m2 0h1m1 0h3m3 0h2m4 0h1m1 0h1m2 0h1m1 0h2m2 0h1m1 0h2m-41 1h1m1 0h1m3 0h1m4 0h1m2 0h1m1 0h3m1 0h3m1 0h3m2 0h2m1 0h5m1 0h1m-31 1h3m4 0h2m2 0h3m1 0h1m2 0h4m2 0h1m3 0h2m2 0h1m-41 1h7m2 0h1m1 0h1m3 0h2m1 0h1m1 0h1m4 0h1m1 0h1m2 0h3m1 0h1m1 0h1m2 0h1m-40 1h1m5 0h1m1 0h1m2 0h1m4 0h1m2 0h1m1 0h2m1 0h1m1 0h1m4 0h2m3 0h2m-38 1h1m1 0h3m1 0h1m1 0h2m2 0h2m2 0h1m1 0h1m1 0h1m1 0h2m1 0h5m2 0h5m1 0h1m-39 1h1m1 0h3m1 0h1m1 0h1m1 0h1m1 0h1m1 0h2m1 0h1m1 0h1m1 0h3m2 0h1m2 0h2m1 0h1m2 0h1m3 0h2m-41 1h1m1 0h3m1 0h1m1 0h3m1 0h2m1 0h1m2 0h1m1 0h2m2 0h1m2 0h1m3 0h4m1 0h1m1 0h1m-39 1h1m5 0h1m4 0h1m1 0h1m1 0h4m1 0h2m2 0h1m1 0h1m5 0h1m1 0h2m1 0h1m1 0h1m-40 1h7m1 0h5m1 0h3m3 0h1m1 0h1m1 0h4m5 0h1m2 0h1m1 0h1"/></svg>
-    <p class="hint">Opens Messages with the install text already typed. Send it to your Cubbie.</p>
-    <a class="btn" href="sms:?&body=Install%20this%20skill%3A%20https%3A%2F%2Fgithub.com%2Fdkoyi%2FCubs%2Ftree%2Fmain%2Fsupercub">Tap to text Cubbie instead</a>
+    <h2 id="install" class="display" style="font-size:1.4rem;margin:.6rem 0 0">Copy, then text it to Cubbie</h2>
+    <p class="hint">Paste this into your Cubbie chat. Every Cubbie has its own number, so use the chat you already have.</p>
+    <pre class="msg" id="msg">Install this skill: https://github.com/dkoyi/Cubs/tree/main/supercub</pre>
+    <button class="btn" id="copy" type="button">Copy the message</button>
   </section>
+  <script>
+    (function () {
+      var btn = document.getElementById('copy'), msg = document.getElementById('msg'), t;
+      function done(ok) {
+        btn.textContent = ok ? 'Copied. Now paste it to Cubbie.' : 'Press and hold the message to copy';
+        clearTimeout(t); t = setTimeout(function () { btn.textContent = 'Copy the message'; }, 3000);
+      }
+      btn.addEventListener('click', function () {
+        var text = msg.textContent.trim();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+        } else { done(false); }
+      });
+    })();
+  </script>
 
   <ol class="steps">
-    <li><strong>Send the text to your Cubbie.</strong> Every Cubbie has its own number, so pick your Cubbie chat. Cubbie asks before it fetches anything. Reply yes.</li>
+    <li><strong>Copy the message and text it to your Cubbie.</strong> Cubbie asks before it fetches anything. Reply yes.</li>
     <li><strong>One more yes.</strong> Cubbie sends the defaults in one message. Say yes, or tell it what to change.</li>
     <li><strong>Live your week.</strong> You never submit a request. Every 2 hours Cubbie syncs a few approved facts about your classes and what you've told it you're up to, and texts you only when it finds someone worth meeting. You both say yes before anything is shared.</li>
   </ol>
