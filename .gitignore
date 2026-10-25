@@ -13,3 +13,10 @@ research/data/
 
 # Private agent boxes, conversation state and messaging outbox.
 agents/data/
+
+# Local notes and research, not part of the submission.
+research/
+AGENTS.md
+CLAUDE.md
+TECHNIQUES.md
+LIVE-DEMO.md
