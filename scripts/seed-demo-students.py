@@ -2,7 +2,7 @@
 """Seed clearly-labelled demo students into the live Super Cub network using the real
 connect.py client, so real phones can see the network effect during the hackathon.
 
-Every demo student is named "Demo <Name>", uses a @supercub.test contact, and keeps its
+Every demo student is a synthetic sample profile with a @supercub.test contact, and keeps its
 own data dir under /tmp/supercub-demo/<name> so it can answer or leave later:
 
   python3 -I scripts/seed-demo-students.py seed          # create and sync all demo students
@@ -30,25 +30,25 @@ OFFSET = timezone(timedelta(hours=-7))
 # Overlaps are chosen to touch the three real accounts seen tonight:
 # Cubbie Hackathon + AI project (Apoorv), CSE 240 (Malaika), CSE 240 Project 1 / Adobe hackathon (Dhanush).
 DEMO = [
-    ("Demo Priya", "Building a voice AI study helper", [("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"), ("working_on", "topic", "AI project"),
+    ("Priya Shah", "Building a voice AI study helper", [("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"), ("working_on", "topic", "AI project"),
                     ("interested_in", "topic", "voice AI"), ("looking_for", "topic", "frontend help"), ("open_to", "activity", "teammates")]),
-    ("Demo Marcus", "Frontend dev, React and design systems", [("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"), ("interested_in", "topic", "frontend design"),
+    ("Marcus Lee", "Frontend dev, React and design systems", [("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"), ("interested_in", "topic", "frontend design"),
                      ("can_help_with", "topic", "React"), ("open_to", "activity", "teammates"), ("open_to", "activity", "collaboration")]),
-    ("Demo Sofia", "CSE 240 student who likes debugging C", [("enrolled_in", "course", "CSE 240"), ("working_on", "topic", "CSE 240 Project 1"),
+    ("Sofia Ramirez", "CSE 240 student who likes debugging C", [("enrolled_in", "course", "CSE 240"), ("working_on", "topic", "CSE 240 Project 1"),
                     ("can_help_with", "topic", "pointers"), ("open_to", "activity", "study")]),
-    ("Demo Wei", "CS junior, tutors recursion", [("enrolled_in", "course", "CSE 240"), ("enrolled_in", "course", "MAT 243"),
+    ("Wei Chen", "CS junior, tutors recursion", [("enrolled_in", "course", "CSE 240"), ("enrolled_in", "course", "MAT 243"),
                   ("can_help_with", "topic", "recursion"), ("open_to", "activity", "study")]),
-    ("Demo Aisha", "Product designer, Figma and UX research", [("attending", "event", "Adobe University Hackathon"), ("interested_in", "topic", "design"),
+    ("Aisha Bello", "Product designer, Figma and UX research", [("attending", "event", "Adobe University Hackathon"), ("interested_in", "topic", "design"),
                     ("can_help_with", "topic", "UX research"), ("open_to", "activity", "teammates")]),
-    ("Demo Leo", "Speech recognition research assistant", [("enrolled_in", "course", "CSE 110"), ("attending", "event", "DevHacks"), ("working_on", "topic", "AI project"),
+    ("Leo Park", "Speech recognition research assistant", [("enrolled_in", "course", "CSE 110"), ("attending", "event", "DevHacks"), ("working_on", "topic", "AI project"),
                   ("interested_in", "topic", "speech recognition"), ("experienced_in", "topic", "machine learning"), ("open_to", "activity", "collaboration")]),
-    ("Demo Nina", "Pre-med building a health app", [("working_on", "topic", "healthcare app"), ("looking_for", "topic", "technical cofounder"),
+    ("Nina Patel", "Pre-med building a health app", [("working_on", "topic", "healthcare app"), ("looking_for", "topic", "technical cofounder"),
                    ("interested_in", "topic", "startups"), ("open_to", "activity", "collaboration")]),
-    ("Demo Omar", "ASU alum, product manager at a fintech startup", [("experienced_in", "topic", "product management"), ("can_help_with", "topic", "APM interviews"),
+    ("Omar Haddad", "ASU alum, product manager at a fintech startup", [("experienced_in", "topic", "product management"), ("can_help_with", "topic", "APM interviews"),
                    ("interested_in", "topic", "startups"), ("open_to", "activity", "mentoring"), ("open_to", "activity", "advising")]),
-    ("Demo Grace", "Runs the ASU AI club", [("interested_in", "topic", "machine learning"), ("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"),
+    ("Grace Kim", "Runs the ASU AI club", [("interested_in", "topic", "machine learning"), ("attending", "event", "Cubbie Hackathon"), ("attending", "event", "DevHacks"),
                     ("can_help_with", "topic", "pitch decks"), ("open_to", "activity", "buddies")]),
-    ("Demo Diego", "Looking for gym and study buddies", [("enrolled_in", "course", "MAT 243"), ("interested_in", "topic", "fitness"),
+    ("Diego Torres", "Looking for gym and study buddies", [("enrolled_in", "course", "MAT 243"), ("interested_in", "topic", "fitness"),
                     ("looking_for", "topic", "study group"), ("open_to", "activity", "study"), ("open_to", "activity", "buddies")]),
 ]
 
@@ -72,11 +72,11 @@ def run(name: str, *args: str) -> str:
 
 
 def context_for(name: str, headline: str, sigs: list[tuple[str, str, str]]) -> Path:
-    first = name.split()[1]
+    first = name.split()[0]
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     ctx = {
         "tz": TZ,
-        "policy": {"first_name": name, "school": "ASU", "contact": f"demo-{first.lower()}@supercub.test",
+        "policy": {"first_name": first, "school": "ASU", "contact": f"demo-{first.lower()}@supercub.test",
                    "participating": True, "intro": "automatic", "discoverable": "school", "share_events": True,
                    "share_intro_profile": True, "intro_profile": {"name": name, "headline": headline}},
         "signals": [

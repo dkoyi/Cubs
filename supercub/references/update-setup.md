@@ -11,7 +11,7 @@ Release: `2026-10-profile-intros-v3`. This is one setup conversation per partici
 
 Example, when every displayed value is actually available and approved:
 
-“Here’s your updated Super Cub setup: Alex Morgan, building a healthcare product; ASU only; advising and teammates; your chosen email alex@example.edu. I’ll use short approved course/project facts, interests and the help offers shown below, not chats, grades, files or email contents. I'll also share public events you tell me you're going to, so you can meet others going; applications stay off. Joining means I'll automatically introduce you to relevant people who also joined and share that email with them, for up to a year. OK to join? You can switch to asking first anytime.”
+“Here’s your updated Super Cub setup: Alex Morgan, building a healthcare product; ASU only; advising and teammates; your chosen email alex@example.edu. I’ll use short approved course/project facts, interests and the help offers shown below, not chats, grades, files or email contents. I'll also share public events you tell me you're going to, so you can meet others going; applications stay off. Joining means I'll automatically introduce you to relevant people who also joined and share that email with them, for up to a year, and I'll check for new matches every 2 hours this week. OK to join? You can switch to asking first anytime.”
 
 Display any profile links/bio and current help offers included in the snapshot. A yes to this particular summary approves its profile and bounded automatic-contact permission. It does not authorize unmentioned events, wider scope, inferred help offers or unrelated schedules. Automatic is the default for everyone who joins; use `intro: "ask"` only if the person asks to approve each introduction. If they decline the update, preserve their existing choices rather than silently expanding or revoking them; an explicit stop still revokes participation by sync.
 
@@ -43,6 +43,6 @@ python3 scripts/connect.py sync
 
 Report revocation only after a successful sync. Previously released contacts cannot be recalled. A local edit is not a remote revocation. Full leave remains available.
 
-## Scheduling is not bundled into a sharing yes
+## Check-ins are part of the one yes
 
-Reuse an existing approved, still-active check-in. Do not create duplicates, silently extend its end date, renew a stale help offer or manufacture proof it ran. If a new schedule is wanted, ask separately for its bounded cadence/end date and confirm supported Cubbie creation. Manual sync remains available if the platform cannot create/retrieve/check in as needed. Unattended Cubbie behavior and real-to-real outcomes still need evidence.
+The setup summary includes "I'll check for new matches every 2 hours this week." On the yes, create ONE check-in ("supercub: sync. Run the Sync section of the supercub Skill.") every 2 hours ending in 7 days, unless the person says no to it. Reuse an existing active check-in instead of creating a duplicate. Confirm creation succeeded before saying check-ins are on; if creation fails, say manual sync still works.
